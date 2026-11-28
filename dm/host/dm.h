@@ -142,6 +142,7 @@ enum { OBS_UE_MALLOC = 21,                                       // Unreal's FMa
 void gate_obs_set(int id, void (*fn)(uint64_t *regs, int param));
 int gate_obs_present(int id);
 uint64_t now_ns(void);
+void dm_now_ns_config(void);           // hle_os.c: read DM_NOW_MUL again (host start, after the env files)
 uint64_t now_cont_ns(void);           // hle_os.c: now_ns counting the device's sleep too (mach_continuous_time), for timers across a break (the heat hold's)
 uint64_t guest_ns(void);              // Guest clock (hle_os.c; does not advance while frozen, guest_clock_freeze)
 uint64_t guest_ns_at_host_time(uint64_t host_ns);  // Host Mach-absolute ns projected into the current guest clock

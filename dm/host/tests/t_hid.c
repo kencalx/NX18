@@ -1772,12 +1772,41 @@ static void t_unsupported_style(void) {
     h_hid_SetStyles(0xffffffffu); pthread_mutex_lock(&g_style_lock); g_style_ev[0] = NULL; pthread_mutex_unlock(&g_style_lock);
 }
 
+// Motion on demand (dm_six_axis_wanted, DM_MOTION_ON_DEMAND in DmGamepad.m): off until the game starts a sensor or the npad IMU, the hook called on each change; a read before any
+// start wants it until the first start, after which only starts and stops decide. Run first: the other tests leave sensors started
+static int g_six_hook_calls;
+static void six_hook(void) { g_six_hook_calls++; }
+static void t_six_axis_wanted(void) {
+    dm_six_axis_hook(six_hook);
+    CHECK(!dm_six_axis_wanted() && g_six_hook_calls == 0, "six-axis: not wanted before the game asks");
+    uint32_t a = 0x3, b = 0x10004; SixAxisState st[2];
+    h_hid_SixStart(&a); CHECK(dm_six_axis_wanted() && g_six_hook_calls == 1, "six-axis: StartSixAxisSensor wants it, the hook is called at once");
+    h_hid_SixStart(&a); h_hid_SixStart(&b); CHECK(dm_six_axis_wanted() && g_six_hook_calls == 1, "six-axis: more starts are no change, no hook call");
+    h_hid_SixStop(&a); CHECK(dm_six_axis_wanted(), "six-axis: one handle stopped, another still started");
+    h_hid_SixStop(&b); CHECK(!dm_six_axis_wanted() && g_six_hook_calls == 2, "six-axis: every handle stopped: not wanted, the hook called");
+    h_hid_SixStop(&b); CHECK(!dm_six_axis_wanted() && g_six_hook_calls == 2, "six-axis: a stop of a stopped handle changes nothing");
+    h_hid_SixStates(st, 2, &a); h_hid_SixRest(&a); CHECK(!dm_six_axis_wanted(), "six-axis: after a start, reads alone do not want it");
+    uint8_t ring[64]; CHECK(h_hid_ImuEnable(ring, sizeof ring) == 0 && dm_six_axis_wanted() && g_six_hook_calls == 3, "six-axis: EnableNpadImu wants it");
+    CHECK(h_hid_ImuEnable(ring, sizeof ring) != 0 && dm_six_axis_wanted() && g_six_hook_calls == 3, "six-axis: a second EnableNpadImu (refused) changes nothing");
+    h_hid_SixStart(&a); h_hid_ImuDisable(); CHECK(dm_six_axis_wanted(), "six-axis: the IMU off with a sensor still started");
+    h_hid_SixStop(&a); CHECK(!dm_six_axis_wanted() && g_six_hook_calls == 4, "six-axis: both off");
+    for (uint32_t i = 0; i < 40; i++) h_hid_SixStart(&(uint32_t){0x100 + i});
+    for (uint32_t i = 0; i < 40; i++) h_hid_SixStop(&(uint32_t){0x100 + i});
+    CHECK(dm_six_axis_wanted(), "six-axis: past 32 started handles it stays wanted for the run (never off by mistake)");
+    // A game that reads before it starts any (the fresh state of another run)
+    pthread_mutex_lock(&g_six_mu); g_six_nstarted = g_six_overflow = g_six_imu = g_six_start_seen = g_six_read_early = 0; atomic_store(&g_six_want, 0); atomic_store(&g_six_read_noted, 0); pthread_mutex_unlock(&g_six_mu);
+    g_six_hook_calls = 0;
+    h_hid_SixStates(st, 1, &a); CHECK(dm_six_axis_wanted() && g_six_hook_calls == 1, "six-axis: a read before any start wants it");
+    h_hid_SixStart(&a); h_hid_SixStop(&a); CHECK(!dm_six_axis_wanted() && g_six_hook_calls == 2, "six-axis: once a start is seen, its stop decides");
+    dm_six_axis_hook(NULL);
+}
 int main(void) {
     CHECK(setenv("DM_RUMBLE_LOG", "1", 1) == 0, "enable rumble diagnostics");
     setenv("DM_IMU_DELAY", "0", 1);   // the tests of the live history read it at the present; t_live_delay checks the playout delay
     // The plumbing tests (streams, interpolation, dither, pairs) were written with the samples negated: they keep that (DM_IMU_*_SIGN=-1); t_npad_imu_samples and
     // t_imu_conversion check the host's own signs
     setenv("DM_IMU_ACC_SIGN", "-1", 1); setenv("DM_IMU_GYRO_SIGN", "-1", 1);
+    t_six_axis_wanted();
     t_npad_imu();
     t_icon_decoration();
     t_slots();

@@ -395,6 +395,96 @@ static void late_lines(NSString *dir) {
     g_shcache = nil; [g_warm_items removeAllObjects]; atomic_store(&g_warm_ready, 0); nvn_hm_clear(&g_pso, hm_rel);
 }
 
+// No shader-only (S) rows (nvn_mtl.m drop_s_on, DM_PSO_DROP_S; upstream NXNative 28d41fc9d): by default the prewarm ignores the lists' S lines and counts them, nothing records
+// one (a draw's own load, a prefetched library's claim, a direct record), a hybrid stand-in's R row reaches the Mac recording too, and the device list's filter leaves S rows
+// out of its set. Each check runs again under =0 (the negative control: the old behaviour, which fails the default's checks)
+static NSArray<NSString *> *file_rows(const char *path) {
+    NSString *t = [NSString stringWithContentsOfFile:@(path) encoding:NSUTF8StringEncoding error:nil];
+    NSMutableArray *r = [NSMutableArray array]; for (NSString *l in [t componentsSeparatedByString:@"\n"]) if (l.length) [r addObject:l];
+    return r;
+}
+static unsigned kind_rows(NSArray<NSString *> *rows, NSUInteger from, NSString *prefix) {
+    unsigned n = 0; for (NSUInteger i = from; i < rows.count; i++) n += [rows[i] hasPrefix:prefix]; return n;
+}
+static void drop_s(NSString *dir) {
+    pso_key key = {0}; key.cfmt[0] = MTLPixelFormatRGBA8Unorm; key.samples = 1; key.chmask = 15;
+    NSString *manifest = [dir stringByAppendingPathComponent:@"drop.tsv"];
+    NSString *text = [NSString stringWithFormat:@"# a comment\nS\twarm-vs\t0\nS\twarm-fs\t1\n%@S\twarm-vs\t0\nC\t\n", row(&key, 0)];
+    EXPECT("S-row manifest written", 1, [text writeToFile:manifest atomically:YES encoding:NSUTF8StringEncoding error:nil]);
+    for (int on = 1; on >= 0; on--) {
+        g_drop_s = on; uint64_t s0 = atomic_load(&g_warm_skip_s); long lines = 0;
+        NSArray<WarmTask *> *tasks = warm_parse(@[manifest], &lines);
+        unsigned shader_tasks = 0; for (WarmTask *t in tasks) shader_tasks += t->kind == 0;
+        NSMutableArray<WarmTask *> *late = [NSMutableArray array]; long now = lines; warm_split_late(tasks, late, &now);
+        if (on) {
+            EXPECT("drop: the S lines are no lines and no tasks, the R line stays", 1, lines == 1 && tasks.count == 1 && shader_tasks == 0 && tasks[0]->kind == 1);
+            EXPECT("drop: every S line counted, the repeated one too", 3, atomic_load(&g_warm_skip_s) - s0);
+            EXPECT("drop: nothing for after the first frame (DM_PSO_LATE_S)", 0, late.count);
+        } else {
+            EXPECT("=0: the S lines are tasks, as before", 1, lines == 3 && tasks.count == 3 && shader_tasks == 2);
+            EXPECT("=0: none counted", 0, atomic_load(&g_warm_skip_s) - s0);
+            EXPECT("=0: the late split sees them (both used by the R line: none waits)", 0, late.count);
+        }
+    }
+    // The 'prewarm done' and 'prepare' lines' shader count: by default the libraries the pipeline lines load (no S task counts any); =0 only the S tasks', as before
+    for (int on = 1; on >= 0; on--) {
+        g_drop_s = on; long lines = 0; NSArray<WarmTask *> *tasks = warm_parse(@[manifest], &lines); NSMutableArray<WarmTask *> *rt = [NSMutableArray array];
+        for (WarmTask *t in tasks) if (t->kind == 1) [rt addObject:t];   // the R line's task alone
+        nvn_hm_clear(&g_pso, hm_rel); g_shcache = nil; g_warm_items = [NSMutableArray array]; atomic_store(&g_warm_ready, 0); g_warm_done = 0; g_warm_shaders = 0;
+        warm_load_begin(); for (WarmTask *t in rt) warm_task(t);
+        if (on) EXPECT("drop: the R line's two libraries counted", 2, g_warm_shaders);
+        else EXPECT("=0: an R line counts no library, as before", 0, g_warm_shaders);
+    }
+    nvn_hm_clear(&g_pso, hm_rel); g_shcache = nil; [g_warm_items removeAllObjects]; atomic_store(&g_warm_ready, 0); g_warm_done = 0; g_warm_shaders = 0;
+    // The recorders: the Mac recording (DM_PSO_RECORD) and the device's list (DM_PSO_USER, through its queue and filter)
+    char rec[] = "/tmp/t_pso_warm_rec.XXXXXX"; int fd = mkstemp(rec); if (fd >= 0) close(fd);
+    NSString *user = [dir stringByAppendingPathComponent:@"drop_user.tsv"];
+    EXPECT("device list written", 1, [@"S\twarm-other\t1\nC\tseed_b\n" writeToFile:user atomically:YES encoding:NSUTF8StringEncoding error:nil]);
+    pso_user_sync(); if (g_pso_user) fclose(g_pso_user);
+    g_pso_record = fopen(rec, "a"); g_pso_record_checked = 1;
+    setenv("DM_PSO_USER", user.fileSystemRepresentation, 1); g_pso_user = NULL; g_pso_user_checked = 0;
+    free(g_pso_user_hs.k); g_pso_user_hs = (pso_hset){0}; g_pso_user_hs_ready = 0; g_pso_user_seen = nil;
+    NSString *saved_map = g_shmap_path; g_shmap_path = nil;   // no seed: the device's list alone fills the filter
+    NvShader *vs = shader_load(@"warm-vs", 0, 0), *fs = shader_load(@"warm-fs", 1, 0);
+    EXPECT("recording fixtures loaded", 1, vs && fs);
+    for (int on = 1; on >= 0 && vs && fs; on--) {
+        g_drop_s = on;
+        NSUInteger r0 = file_rows(rec).count, u0 = file_rows(user.fileSystemRepresentation).count;
+        g_shcache = nil; [g_warm_items removeAllObjects]; atomic_store(&g_warm_ready, 0);
+        EXPECT("a draw's own load", 1, shader_get(@"warm-fs", 1) != nil);   // shader_get's record
+        WarmItem *item = [WarmItem new]; item->kind = 0; item->record = 1; item->key = @"warm-vs"; item->shader = vs; warm_enqueue(item); warm_claim();   // a prefetched library's claim
+        pso_key dk = key; dk.chmask = on ? 7 : 3; demand_record(&dk, vs, fs);   // a hybrid stand-in's demand (another key each pass: one row per key)
+        pso_user_record("S\t%s\t%d\n", "warm-other", 1);   // a direct S record (in the device's list already)
+        pso_user_record("S\t%s\t%d\n", "warm-new", 1);     // and one that is not
+        pso_user_sync(); fflush(g_pso_record);
+        NSArray<NSString *> *r = file_rows(rec), *u = file_rows(user.fileSystemRepresentation);
+        if (on) {
+            EXPECT("drop: the Mac recording has no S row", 0, kind_rows(r, r0, @"S\t"));
+            EXPECT("drop: and the stand-in's R row", 1, kind_rows(r, r0, @"R\t"));
+            EXPECT("drop: the device's list has no new S row", 0, kind_rows(u, u0, @"S\t"));
+            EXPECT("drop: and the stand-in's R row", 1, kind_rows(u, u0, @"R\t"));
+            EXPECT("drop: the filter's set holds the list's C row, not its S row", 1, g_pso_user_hs_ready ? g_pso_user_hs.n == 2 : g_pso_user_seen.count == 2);   // C seed_b and the R row
+        } else {
+            EXPECT("=0: the Mac recording has the draw's and the claim's S rows, as before", 2, kind_rows(r, r0, @"S\t"));
+            EXPECT("=0: and no stand-in R row, as before", 0, kind_rows(r, r0, @"R\t"));
+            // warm-other is not in the set the default filled (it left the S rows out), so =0 writes it again here: a switch changed within one run, never on a device
+            EXPECT("=0: the device's list has the S rows, as before", 4, kind_rows(u, u0, @"S\t"));
+            EXPECT("=0: and the stand-in's R row", 1, kind_rows(u, u0, @"R\t"));
+        }
+    }
+    {   // the filter's fill alone, on a list: S rows left out by default, kept under =0
+        pso_hset hs = {0}; g_drop_s = 1; pso_hset_add_list(&hs, manifest); size_t n_on = hs.n; free(hs.k);
+        hs = (pso_hset){0}; g_drop_s = 0; pso_hset_add_list(&hs, manifest); size_t n_off = hs.n; free(hs.k);
+        EXPECT("filter fill: the R and C rows only", 2, n_on);
+        EXPECT("filter fill =0: the two distinct S rows too, as before", 4, n_off);
+    }
+    g_drop_s = 1; g_warm_t0 = bp_now(); warm_finish();   // the 'prewarm done' line with its S count
+    pso_user_sync(); if (g_pso_user) fclose(g_pso_user); g_pso_user = NULL; g_pso_user_checked = 1;   // nothing more written by the tests after this one
+    free(g_pso_user_hs.k); g_pso_user_hs = (pso_hset){0}; g_pso_user_hs_ready = 0; g_pso_user_seen = nil; unsetenv("DM_PSO_USER");
+    fclose(g_pso_record); g_pso_record = NULL; unlink(rec);
+    g_shmap_path = saved_map; g_shcache = nil; [g_warm_items removeAllObjects]; atomic_store(&g_warm_ready, 0);
+}
+
 // The paths that load a library share one preparation (shader_acquire; adapted from ComicBit/nxnative bee12ec, MIT): the prewarm, a draw's own load and a shader-only line
 // after the first frame ask for the same key while the first load is held at the device, and the library loads once, all three taking the same shader. A failed preparation is
 // not kept (the next caller loads it), DM_NVN_SHADER_SHARE=0 prepares each copy again, and nothing the sharing kept outlives the caches that hold its shaders.
@@ -499,10 +589,12 @@ int main(void) { @autoreleasepool {
     if (!fixtures(@(dir))) { fprintf(stderr, "failed to compile synthetic shader fixtures\n"); [NSFileManager.defaultManager removeItemAtPath:@(dir) error:nil]; return 1; }
     // The prebuild tool's default workers: as many compiles as Metal runs at once, however few cores level 0 has
     EXPECT("prebuild tool workers: Metal's concurrent compiles", g_dev.maximumConcurrentCompilationTaskCount, compile_tasks());
+    g_drop_s = 0;   // DM_PSO_DROP_S=0 for the tests of S lines: the paths they check still run there (drop_s checks the default)
     singleflight(@(dir));
     scenario(@(dir), 0); scenario(@(dir), 1);
     native_mesh(@(dir));
     late_lines(@(dir));
+    drop_s(@(dir));
     shared_paths(@(dir));
     estimate();
     EXPECT("pipelines are built through the Metal 4 compiler", 1, g_comp4 != nil && g_pb_spec > 0);

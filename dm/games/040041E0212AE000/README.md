@@ -30,6 +30,7 @@ There is no game-specific rewriter patch, host branch or shader override. The sh
 - The task and mesh programs need [subword stage-memory accesses](../../../docs/reference/shaders.md#subword-task-and-mesh-payload-accesses). Before those were implemented, all 62 failed to translate.
 - `cded8d0899ba4a6d` (`shaders/volumetricfog.shdr`) needs [indexed texture handles in NVN2 compute c0](../../../docs/reference/shaders.md#indexed-texture-handles-in-nvn2-compute-c0). Before the fix its reflection could not load and the race's sky was black. All 2,975 other base Metal shader sources are byte-identical across that fix.
 - [`pso_manifest.tsv`](pso_manifest.tsv) records the title, menus and first race: 932 shader, 292 render-pipeline and 2 compute-pipeline rows. It does not cover the other courses.
+- **Upstream's seed rows (2026-11-28 check):** [`pso_manifest.tsv`](pso_manifest.tsv) takes the 82 rows (0 `S`, 82 `R`, 0 `C`) upstream NXNative added to its list since the last check (`1a54371cf` to `7bc66e5a3`: `5cbfbfea7`, `3a177d45e`; inbox captures and recordings from upstream's players, not recorded on NX 18's devices) that it lacked, below its rows; the list is now 1,328 rows. Upstream no longer records `S` rows (`28d41fc9d`, not taken here), so every new row is a pipeline. Every row checks clean against this shader map. Only rows new since the last check: rows NX 18 left out on purpose stay out. A first start with them on the iPhone (prepare time, footprint) is not measured.
 
 ## Running on the Mac
 

@@ -110,7 +110,10 @@ extension Library {
             job.state = .checking; job.stageName = "Looking at \(device.name)"
             let apps: [DeviceApp]
             do { apps = try await DeviceCtl.apps(on: device.id); deviceApps[device.id] = apps }
-            catch { job.state = .failed(DeviceError.notConnected(device.name).errorDescription! + " (\(error.localizedDescription))"); return }
+            catch {
+                job.state = Task.isCancelled ? .cancelled : .failed(DeviceError.notConnected(device.name).errorDescription! + " (\(error.localizedDescription))"); return
+            }
+            if Task.isCancelled { job.state = .cancelled; return }   // a Cancel while devicectl listed the apps: none of what follows starts
             let known = installs.first { $0.gameID == id && $0.deviceID == device.id }?.bundleID
             var bundleID = known ?? XcodeSigning.bundleID(titleID: ident.titleId, team: team, onDevice: apps)
             if case .certificate(let identity, let profile) = signer {   // the profile decides: its own App ID, or the game's under a wildcard
@@ -146,6 +149,7 @@ extension Library {
             let seed = await ProfileSetup.seed()
             defer { if let seed { try? FileManager.default.removeItem(at: seed.deletingLastPathComponent()) } }
             do {
+                try Task.checkCancellation()   // a Cancel between the build and signing, or between the stages below, stops at the next one (each tool also stops on it)
                 // 2. signed: by Xcode with the player's account, or by Beam with the player's certificate and profile; both memory entitlements or no install
                 let app: URL, prov: ProvisioningInfo?
                 switch signer {
@@ -162,6 +166,7 @@ extension Library {
                     prov = ProvisioningInfo(expires: profile.expires, increasedMemoryLimit: profile.memory, extendedVirtualAddressing: profile.memory)
                 }
                 guard await MemoryEntitlements.signed(app), prov?.grantsMemory == true else { throw DeviceError.signing(MemoryEntitlements.missingText) }
+                try Task.checkCancellation()
                 // 3. a swap: the save off the device first, then the old game removed
                 if let v = victim {
                     job.stageName = "Making room"; job.step = "Copying the save of \(games.first { $0.id == v.gameID }?.title ?? v.bundleID) to this Mac"
@@ -171,6 +176,7 @@ extension Library {
                     if let i = installs.firstIndex(of: v) { installs[i].removed = true; installs[i].savedCopy = copy }
                 }
                 // 4. installed; a save Beam copied off at an earlier swap goes back
+                try Task.checkCancellation()
                 job.stageName = "Installing on \(device.name)"; job.step = nil
                 try await DeviceCtl.install(app, on: device.id)
                 let earlier = installs.firstIndex { $0.bundleID == bundleID && $0.deviceID == device.id }
@@ -187,7 +193,7 @@ extension Library {
                 job.state = .done
                 notify(g.title, ok: true, target: .iPhone)
             } catch {
-                job.state = .failed(error.localizedDescription)
+                job.state = Task.isCancelled ? .cancelled : .failed(error.localizedDescription)   // a stopped tool fails with its own message: the Cancel is why
             }
         }
     }

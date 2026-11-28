@@ -38,6 +38,11 @@ run: $(B)/t_net_eventfd $(B)/t_language $(B)/t_motion $(B)/t_heap_size $(B)/t_to
 	$(B)/t_uecvar
 	$(B)/t_ue_heap_span
 	$(B)/t_ue_heap_late
+	DM_UE_HEAP_FAST=0 $(B)/t_ue_heap_span
+	DM_UE_HEAP_FAST=0 $(B)/t_ue_heap_late
+	$(B)/t_ue_heap_fast
+	DM_UE_HEAP_FAST=0 $(B)/t_ue_heap_fast
+	$(B)/t_ue_heap_fast_noflush --expect-leak
 	$(B)/t_audren_work
 	$(B)/t_audren_layout
 	$(B)/t_swkbd
@@ -103,8 +108,26 @@ run: $(B)/t_net_eventfd $(B)/t_language $(B)/t_motion $(B)/t_heap_size $(B)/t_to
 	$(B)/t_mod_rows
 	$(B)/t_aac_layout
 	$(B)/t_aspect
+	$(B)/t_now_mul
+	$(B)/t_wait_trim
+	$(B)/t_wait_trim_bad --expect-mismatch
 run: $(B)/t_nro
 run: $(B)/t_aspect
+run: $(B)/t_now_mul $(B)/t_wait_trim $(B)/t_wait_trim_bad
+# the wait-list trims against the rescans (../hle_thread.c pick_more, DM_WAIT_TRIM); _bad: the negative control, a waiter count off by one; wait-trim-bench: ns per call under G
+$(B)/t_wait_trim: t_wait_trim.c t_condvar_stub.c ../hle_thread.c ../dm_spin.h ../dm.h $(GAME_DEP) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -DDM_TEST_WAKE_ORDER -I.. $(GINC) -o $@ t_wait_trim.c t_condvar_stub.c
+$(B)/t_wait_trim_bad: t_wait_trim.c t_condvar_stub.c ../hle_thread.c ../dm_spin.h ../dm.h $(GAME_DEP) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -DDM_TEST_WAKE_ORDER -DDM_TEST_WAIT_TRIM_BAD -I.. $(GINC) -o $@ t_wait_trim.c t_condvar_stub.c
+.PHONY: wait-trim-bench
+wait-trim-bench: $(B)/t_wait_trim
+	$(B)/t_wait_trim --bench
+# now_ns's multiply against the divide it replaced (../dm_tbconv.h, DM_NOW_MUL); now-mul-bench: ns per conversion, best of 5
+$(B)/t_now_mul: t_now_mul.c ../dm_tbconv.h | $(B)
+	$(CLANG) -O2 -g -Wall -Werror -o $@ t_now_mul.c
+.PHONY: now-mul-bench
+now-mul-bench: $(B)/t_now_mul
+	$(B)/t_now_mul --bench
 # Ultrawide's camera in the loader (../loader.c dm_game_aspect): the fixups key, the build gate, the ratio asked for and the guest's acknowledgement (synthetic pages, no game files)
 $(B)/t_aspect: t_aspect.c ../loader.c ../hle.h ../dm.h $(GAME_DEP) | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -Wno-deprecated-declarations -I.. $(GINC) -o $@ t_aspect.c
@@ -255,7 +278,15 @@ run: framewg
 .PHONY: framewg
 $(B)/t_framewg: t_framewg.c ../frame_wg.c ../frame_wg.h ../dm.h $(GAME_DEP) | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_framewg.c -framework AudioToolbox
-run: $(B)/t_ue_heap_span $(B)/t_ue_heap_late
+run: $(B)/t_ue_heap_span $(B)/t_ue_heap_late $(B)/t_ue_heap_fast $(B)/t_ue_heap_fast_noflush
+# per-thread bookkeeping of Unreal's heap (DM_UE_HEAP_FAST); _noflush: the negative control without the thread-exit hook; ue-heap-bench: ns per Malloc + Free pair
+$(B)/t_ue_heap_fast: t_ue_heap_fast.c ../hle_uemalloc.c ../hle.h ../dm.h $(GAME_DEP) | $(B)
+	$(CLANG) -O2 -g -Wall -Werror -Wno-unused-function $(GINC) -o $@ t_ue_heap_fast.c
+$(B)/t_ue_heap_fast_noflush: t_ue_heap_fast.c ../hle_uemalloc.c ../hle.h ../dm.h $(GAME_DEP) | $(B)
+	$(CLANG) -O2 -g -Wall -Werror -Wno-unused-function -DDM_TEST_UE_NO_EXIT_FLUSH $(GINC) -o $@ t_ue_heap_fast.c
+.PHONY: ue-heap-bench
+ue-heap-bench: $(B)/t_ue_heap_fast
+	$(B)/t_ue_heap_fast --bench
 $(B)/t_ue_heap_span: t_ue_heap_span.c ../hle_uemalloc.c ../hle.h ../dm.h $(GAME_DEP) | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function $(GINC) -o $@ t_ue_heap_span.c
 $(B)/t_ue_heap_late: t_ue_heap_late.c ../hle_uemalloc.c ../hle.h ../dm.h $(GAME_DEP) | $(B)
@@ -266,6 +297,12 @@ $(B)/t_uecvar: t_uecvar.c ../hle_uecvar.c ../hle.h ../dm.h $(GAME_DEP) | $(B)
 $(B)/t_swkbd: t_swkbd.c ../hle_swkbd.c ../hle.h ../dm.h $(GAME_DEP) | $(B)
 	$(CLANG) -O1 -Wno-unused-function -I.. $(GINC) -o $@ t_swkbd.c ../hle_swkbd.c
 run: $(B)/t_bigstack
+run: log-home
+.PHONY: log-home
+log-home: $(B)/t_log_home
+	$(B)/t_log_home
+$(B)/t_log_home: t_log_home.c ../hle_bigstack.c ../hle.h ../dm.h $(GAME_DEP) | $(B)
+	$(CLANG) -O1 -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_log_home.c ../hle_bigstack.c
 run: web-stack
 .PHONY: web-stack
 web-stack: $(B)/t_web_stack
@@ -575,11 +612,12 @@ include ../../sanitizers/sanitizers.mk
 asan:
 	@$(call san_fresh,$(B)/asan,$(ASAN_FLAGS))
 	$(ASAN_ENV) $(MAKE) B=$(B)/asan SAN="$(ASAN_FLAGS)" run
-TSAN_T = t_audio t_audio_stats t_audio_device t_thread_leak t_oe t_fs_commit_list t_fs_case t_save_sync t_condvar t_condvar_old t_preempt t_system_event t_notify_sched t_handoff_wait t_altstack t_sync_wait
+TSAN_T = t_ue_heap_fast t_audio t_audio_stats t_audio_device t_thread_leak t_oe t_fs_commit_list t_fs_case t_save_sync t_condvar t_condvar_old t_preempt t_system_event t_notify_sched t_handoff_wait t_altstack t_sync_wait
 tsan-threads:
 	@$(call san_fresh,$(B)/tsan,$(TSAN_FLAGS))
 	$(TSAN_ENV) $(MAKE) B=$(B)/tsan SAN="$(TSAN_FLAGS)" tsan-threads-run
 tsan-threads-run: $(addprefix $(B)/,$(TSAN_T))
+	$(B)/t_ue_heap_fast
 	$(B)/t_audio
 	$(B)/t_audio_stats
 	$(B)/t_audio_device

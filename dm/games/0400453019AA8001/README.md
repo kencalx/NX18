@@ -128,6 +128,7 @@ null destination. Device bring-up is open.
   NX 18's devices. Every row checks clean against this shader map (`pso_seed.py check`). Its
   effect on a first start's prepare step on the iPhone is not measured yet: the 552 `R` rows
   give the next build's archive its layout bases, and most `S` rows load after the first frame.
+- **Upstream's seed rows (2026-11-28 check):** [`pso_manifest.tsv`](pso_manifest.tsv) takes the 246 rows (0 `S`, 245 `R`, 1 `C`) upstream NXNative added to its list since the last check (`1a54371cf` to `7bc66e5a3`: `eaa89abcf`, `69721307a`; inbox captures and recordings from upstream's players, not recorded on NX 18's devices) that it lacked, below its rows; the list is now 5,599 rows. Upstream no longer records `S` rows (`28d41fc9d`, not taken here), so every new row is a pipeline. Every row checks clean against this shader map. The base program `0100453019AA8000`'s rows upstream added in the same commits (about 28,600, no key shared with this Switch 2 Edition) are not taken. Only rows new since the last check: rows NX 18 left out on purpose stay out. A first start with them on the iPhone (prepare time, footprint) is not measured.
 
 ## Found on this game
 

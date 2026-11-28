@@ -256,9 +256,15 @@ void dm_thread_service_connect(void) {
 }
 #define SERVICE_START_WAIT_NS 5000000
 #define SERVICE_ROUND_TRIP_NS 200000
+// A request from a thread in no handoff returns without G (DM_FS_HAND_PEEK=0: it takes G to look, as before), as SleepThread's check does. It is the same answer as under G: while a
+// thread runs guest or host code, only it raises its own nhand (note_runnable sets it for a thread being woken from a wait or started, which is not running then, and hand_leave
+// clears it for itself); the others only lower it (thr_free drops entries of a freed waker, stored atomically for this load). A 0 seen here stays 0 until this thread waits again,
+// and a stale non-zero only takes the old path, which looks again under G. (A second StartThread of a running thread, which Horizon refuses, would break that; SleepThread shares it.)
+static _Alignas(128) int g_fs_peek = 1;
 void dm_thread_service_request(void) {
     thr_t *me = pthread_getspecific(g_keythr);
     if (!me) return;
+    if (g_fs_peek && !__atomic_load_n(&me->nhand, __ATOMIC_RELAXED)) return;
     g_lock();
     if (!me->nhand) { g_unlock(); return; }
     thr_t *by = me->start_by; uint64_t epoch = me->start_epoch;
@@ -433,6 +439,24 @@ static thr_t *pick(int kind, uint64_t a) {
     }
     return b;
 }
+// The same pick, also telling whether another waiter matches (*more), which the walk sees anyway: the callers' rescans of the whole list for one more waiter (lock_handoff's waiters
+// bit, SignalProcessWideKey's key) and their last pick that finds none are not needed (DM_WAIT_TRIM, on by default; =0 the rescans, as before). The same waiters are woken in the
+// same order: tests/t_wait_trim.c compares both modes over random wait lists
+static _Alignas(128) int g_wait_trim = 1;
+static thr_t *pick_more(int kind, uint64_t a, int *more) {
+    thr_t *b = NULL; int m = 0;
+    for (thr_t *t = g_wait; t; t = t->next) {
+        if (t->wkind != kind || (kind == 2 ? t->wkey : t->waddr) != a) continue;
+        m++;
+        if (!b || t->prio < b->prio || (t->prio == b->prio && t->wseq < b->wseq)) b = t;
+    }
+#ifndef DM_TEST_WAIT_TRIM_BAD
+    *more = m > 1;
+#else   // negative control for t_wait_trim only: a count off by one
+    *more = m > 2;
+#endif
+    return b;
+}
 // Holding G. Starting a thread makes it runnable just as waking a waiter does;
 // neither operation promises that an equal-priority or other-core peer has run.
 // t joins the waker's current handoff and those the waker is part of: Metroid Dread's main thread (priority 44) waits for its movie dispatcher (30),
@@ -451,7 +475,14 @@ static void wake_queue(thr_t *t) {
     if (g_wake_unlocked && t_nwdef < WDEF) { atomic_fetch_add_explicit(&t->sig_pend, 1, memory_order_relaxed); t_wdef[t_nwdef++] = t; }
     else pthread_cond_signal(&t->cv);
 }
+#ifdef DM_TEST_WAKE_ORDER
+extern void dm_test_woken(thr_t *t);   // t_wait_trim: the order of the wakes
+#define WAKE_TEST_HOOK(t) dm_test_woken(t)
+#else
+#define WAKE_TEST_HOOK(t)
+#endif
 static void wake(thr_t *t, int64_t res) {
+    WAKE_TEST_HOOK(t);
     wait_unlink(t); t->wkind = 0; t->woke = 1; t->wres = res; wake_queue(t);
     note_runnable(t);
 }
@@ -480,9 +511,9 @@ static inline int cas32(uint64_t a, uint32_t *exp, uint32_t v) { return __atomic
 
 // Release the lock at addr: hand it to the first thread waiting on it, or clear it to zero (holding G)
 static void lock_handoff(uint64_t addr) {
-    thr_t *w = pick(1, addr); int more = 0;
+    int more = 0; thr_t *w = g_wait_trim ? pick_more(1, addr, &more) : pick(1, addr);
     if (!w) { st32(addr, 0); return; }
-    for (thr_t *t = g_wait; t; t = t->next) if (t != w && t->wkind == 1 && t->waddr == addr) { more = 1; break; }
+    if (!g_wait_trim) for (thr_t *t = g_wait; t; t = t->next) if (t != w && t->wkind == 1 && t->waddr == addr) { more = 1; break; }
     st32(addr, w->wtag | (more ? WAITERS_BIT : 0));
     wake(w, 0);
 }
@@ -572,7 +603,7 @@ static void thr_free(thr_t *t) {   // Holding G; unlink from the all-threads cha
     { thr_t *e = t; atomic_compare_exchange_strong(&g_ys_acq, &e, NULL); }   // the acquire mark (dm_thread_acquire_mark) never outlives its thread: a new thread at this address is a worker
     for (thr_t *u = g_all; u; u = u->all)   // no handoff entry may point at the freed object (note_runnable reads the waker's epoch)
     {
-        for (int i = 0; i < u->nhand; ) if (u->hand[i].by == t) u->hand[i] = u->hand[--u->nhand]; else i++;
+        for (int i = 0; i < u->nhand; ) if (u->hand[i].by == t) { u->hand[i] = u->hand[u->nhand - 1]; __atomic_store_n(&u->nhand, u->nhand - 1, __ATOMIC_RELAXED); } else i++;   // u may be running: dm_thread_service_request reads it without G
         if (u->start_by == t) u->start_by = NULL;
     }
     pthread_cond_destroy(&t->cv); pthread_cond_destroy(&t->pcv); if (t->hcv_init) pthread_cond_destroy(&t->hcv); free(t);
@@ -765,6 +796,8 @@ uint32_t svc_thread_main_init(void) {
     yield_spin_init();
     { const char *e = getenv("DM_PREEMPT"); g_core_preempt = e ? atoi(e) != 0 : DM_GAME_CORE_PREEMPT; }
     { const char *e = getenv("DM_WAKE_UNLOCKED"); if (e) g_wake_unlocked = atoi(e) != 0; }
+    { const char *e = getenv("DM_FS_HAND_PEEK"); if (e) g_fs_peek = atoi(e) != 0; }
+    { const char *e = getenv("DM_WAIT_TRIM"); if (e) g_wait_trim = atoi(e) != 0; }
     pause_install();
     hitch_init();
     thr_t *t = calloc(1, sizeof *t);
@@ -1813,8 +1846,13 @@ static int svc_thread_impl(int num, uint64_t *regs) {
     case 0x1D: {  // SignalProcessWideKey(x0 condition key, w1 count, <=0 all)
         uint64_t key = regs[0]; int cnt = (int)regs[1], n = 0;
         g_lock();
-        for (thr_t *w; (cnt <= 0 || n < cnt) && (w = pick(2, key)); n++) lock_acquire_for(w, w->waddr, w->wtag);   // In kernel order; once turned into a lock wait or woken it is no longer kind 2
-        int left = 0; for (thr_t *w = g_wait; w; w = w->next) if (w->wkind == 2 && w->wkey == key) { left = 1; break; }
+        int left = 0;
+        if (g_wait_trim)   // the pick says whether another waiter is left: once none is, no pick and no rescan (lock_acquire_for changes only the waiter it is given)
+            for (thr_t *w; (cnt <= 0 || n < cnt) && (w = pick_more(2, key, &left)); n++) { lock_acquire_for(w, w->waddr, w->wtag); if (!left) break; }
+        else {
+            for (thr_t *w; (cnt <= 0 || n < cnt) && (w = pick(2, key)); n++) lock_acquire_for(w, w->waddr, w->wtag);   // In kernel order; once turned into a lock wait or woken it is no longer kind 2
+            for (thr_t *w = g_wait; w; w = w->next) if (w->wkind == 2 && w->wkey == key) { left = 1; break; }
+        }
         if (!left) st32(key, 0);
         g_unlock();
         regs[0] = 0; return 1;
@@ -1839,7 +1877,7 @@ static int svc_thread_impl(int num, uint64_t *regs) {
     case 0x35: {  // SignalToAddress(x0 address, w1 type, w2 value, w3 count): 0 wake, 1 increment if equal and wake, 2 if equal modify the value by waiter count and wake
         uint64_t addr = regs[0]; int type = (int)regs[1]; int32_t val = (int32_t)regs[2]; int cnt = (int)regs[3];
         g_lock();
-        int nw = 0; for (thr_t *w = g_wait; w; w = w->next) if (w->wkind == 3 && w->waddr == addr) nw++;
+        int nw = 0; if (!g_wait_trim || type == 2) for (thr_t *w = g_wait; w; w = w->next) if (w->wkind == 3 && w->waddr == addr) nw++;   // only type 2 uses the count
         int64_t r = 0;
         if (type != 0) {
             int32_t nv = val + 1;
@@ -1852,7 +1890,9 @@ static int svc_thread_impl(int num, uint64_t *regs) {
             uint32_t e = (uint32_t)val;
             if (!cas32(addr, &e, (uint32_t)nv)) r = R_BAD_STATE;
         }
-        if (!r) { int n = 0;
+        if (!r && g_wait_trim) { int n = 0, more = 1;   // type 2 with no waiter picks nothing; the last pick says when none is left
+            if (type != 2 || nw) for (thr_t *w; more && (cnt <= 0 || n < cnt) && (w = pick_more(3, addr, &more)); n++) wake(w, 0); }
+        else if (!r) { int n = 0;
             for (thr_t *w; (cnt <= 0 || n < cnt) && (w = pick(3, addr)); n++) wake(w, 0); }
         g_unlock();
         regs[0] = (uint64_t)r; return 1;

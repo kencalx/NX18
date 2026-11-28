@@ -151,6 +151,26 @@ static void resize_case(void) {
     snap_present(&big);
     CHECK("slot 1's old texture leaves at its next use", ![g_snap_res containsAllocation:old1] && !g_snap[1].old);
 }
+// A new size whose slot texture cannot be made (memory pressure) leaves the slot as it was: the present falls back to the game's texture, and the slot's live texture is not
+// marked old. Before, .old was set first, so after a flip back to the old size the slot's next use took its live texture out of the residency set and copied into it (a GPU fault)
+static void alloc_fail_case(void) {
+    tex_t small = source_n(0, 8), big = source_n(26, 16);
+    snap_present(&small); snap_present(&small);
+    CHECK("both ring slots copied", [g_snap_ev waitUntilSignaledValue:g_snap_v timeoutMS:2000]);
+    id<MTLTexture> live0 = g_snap[0].tex; uint64_t copies = g_snap_v, next = g_snap_next;
+    t_snap_tex_fail = 1;
+    present_enqueue(&big, 1. / 60, NULL, NULL); mtl_present_flush();
+    t_snap_tex_fail = 0;
+    CHECK("a failed slot texture falls back to the game's texture", g_snap_v == copies && g_snap_next == next);
+    CHECK("the slot keeps its live texture", g_snap[0].tex == live0 && live0.width == 8);
+    CHECK("the live texture is not marked old", g_snap[0].old == nil);
+    snap_present(&small);   // a flip back to the old size: the slot's next use
+    CHECK("the copy after the flip back completes", [g_snap_ev waitUntilSignaledValue:g_snap_v timeoutMS:2000] && g_snap_v == copies + 1);
+    CHECK("the slot's live texture is still resident", g_snap[0].tex == live0 && [g_snap_res containsAllocation:live0]);
+    pixels(live0, 73);
+    snap_present(&big);
+    CHECK("a later allocation replaces the slot texture", g_snap[1].tex.width == 16 && [g_snap_res containsAllocation:g_snap[1].tex]);
+}
 // The copy takes the present's crop alone, at its own place in a slot of the window texture's size (MacNativeGames 78cf9896): inside the crop the new picture, outside it what the
 // slot held before. A crop off the texture, or the whole texture, copies it whole; `crop whole` runs under DM_PRESENT_SNAP_WHOLE=1, which copies the whole texture every time
 static int slot_px(id<MTLTexture> t, int x, int y) {   // one texel's red byte of a 16x16 slot
@@ -293,6 +313,7 @@ int main(int argc, char **argv) { @autoreleasepool {
     else if (!strcmp(argv[1], "pacing")) pacing_case();
     else if (!strcmp(argv[1], "copy")) pending_copy_case();
     else if (!strcmp(argv[1], "resize")) resize_case();
+    else if (!strcmp(argv[1], "alloc_fail")) alloc_fail_case();
     else if (!strcmp(argv[1], "crop")) crop_case(0);
     else if (!strcmp(argv[1], "crop_whole")) crop_case(1);
     else if (!strcmp(argv[1], "queued")) queued_case();

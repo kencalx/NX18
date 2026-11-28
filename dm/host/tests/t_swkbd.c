@@ -1,7 +1,11 @@
 // swkbd unit test (takes seconds): lay out a ShowKeyboardArg by hand following the SDK layout, have swkbd_show write back the String, and all expected bytes are computed by hand.
 // Build and run: cd dm/host/tests && clang -O1 -I.. -o /tmp/t_swkbd t_swkbd.c ../hle_swkbd.c && /tmp/t_swkbd
+#define DM_LOG_IMPL   // the log lines are kept (g_log) for the privacy checks below; hle_swkbd.c's weak dm_log gives way to this one
 #include "../hle.h"
+#include <stdarg.h>
 #include <stdio.h>
+static char g_log[4096];
+void dm_log(const char *fmt, ...) { va_list ap; va_start(ap, fmt); vsnprintf(g_log, sizeof g_log, fmt, ap); va_end(ap); fprintf(stderr, "%s\n", g_log); }
 
 Result swkbd_show(void *out, const void *arg, int (*input)(const char *, const char *, const char *, const char *, int, char *, int));
 int front_text_input(const char *t, const char *s, const char *g, const char *i, int m, char *o, int c) { (void)t; (void)s; (void)g; (void)i; (void)m; (void)o; (void)c; return -1; }
@@ -93,6 +97,22 @@ int main(void) {
     static const uint8_t w7[] = {'K', 'b', 'd', 0};
     CHECK(r == 0 && bytes_eq(w7, sizeof w7) && g_called == 0, "DM_KBD path differs (input box called %d times)", g_called);
     unsetenv("DM_KBD");
+
+    printf("8 the log gives the typed and the initial text as their length, not the text (a player's name)\n");
+    static const uint16_t pat[] = {'P', 'a', 't', 0x00E9};   // "Paté": 4 characters, 5 UTF-8 bytes
+    unsetenv("DM_SWKBD_LOG_TEXT");
+    mkarg(1, 16, pat, 4); g_ret = 1; g_reply = "Rosalind";
+    swkbd_show(&str, arg, stub);
+    CHECK(strstr(g_log, "initial (4 characters)") && strstr(g_log, "→ OK (8 characters)"), "log line: %s", g_log);
+    CHECK(!strstr(g_log, "Rosalind") && !strstr(g_log, "Pat"), "the log carries the text: %s", g_log);
+    mkarg(1, 16, pat, 4); g_ret = 0; swkbd_show(&str, arg, stub);
+    CHECK(strstr(g_log, "→ cancel") && !strstr(g_log, "Pat"), "cancel line: %s", g_log);
+    printf("9 DM_SWKBD_LOG_TEXT=1 (diagnostic) logs the text itself, as before\n");
+    setenv("DM_SWKBD_LOG_TEXT", "1", 1);
+    mkarg(1, 16, pat, 4); g_ret = 1; g_reply = "Rosalind";
+    swkbd_show(&str, arg, stub);
+    CHECK(strstr(g_log, "initial 'Pat\xC3\xA9'") && strstr(g_log, "→ OK 'Rosalind'"), "log line: %s", g_log);
+    unsetenv("DM_SWKBD_LOG_TEXT");
 
     printf("%s: %d/%d\n", fails ? "FAILED" : "all passed", checks - fails, checks);
     return fails != 0;

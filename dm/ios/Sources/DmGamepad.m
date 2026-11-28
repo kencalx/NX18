@@ -67,6 +67,11 @@ static void publish(void) {   // the touch gamepad and the shake; the host ORs t
 // (1.5 G by default; Documents/env.txt overrides) is a hit. The controller is shaken until 120 ms after the last hit: a flick is one shake (the host finishes it as a whole cycle)
 // and shaking on keeps it going. Holding the phone and pressing the screen stays far below the threshold. Each detected shake is logged with its peak
 static CMMotionManager *g_motion;
+static int g_on_demand = 1;                           // DM_MOTION_ON_DEMAND (Motion on demand, below)
+static NSOperationQueue *g_acc_q, *g_dev_q;           // one serial queue per stream, made once
+static CMAccelerometerHandler g_acc_handler;          // nil: no accelerometer (or not set up)
+static BOOL g_acc_live;                               // with g_mu: the accelerometer's samples may set the shake (on demand: between sensors_set's start and stop)
+static CMDeviceMotionHandler g_dev_handler;           // nil: the phone's gyro is not used (DM_MOTION=0, DM_PHONE_MOTION=0, no device motion)
 static void motion_start(void) {
     if (g_motion) return;
     g_motion = [CMMotionManager new];
@@ -74,21 +79,25 @@ static void motion_start(void) {
     const char *e = getenv("DM_SHAKE_G"); double thr = e && atof(e) > 0 ? atof(e) : 1.5;
     LOG("front end: shaking the phone shakes the controller (threshold %.2f G)", thr);
     g_motion.accelerometerUpdateInterval = 1.0 / 60;
-    NSOperationQueue *q = [NSOperationQueue new]; q.maxConcurrentOperationCount = 1;
-    __block double gx = 0, gy = 0, gz = 0, last = -1, peak = 0; __block BOOL init = NO;
-    [g_motion startAccelerometerUpdatesToQueue:q withHandler:^(CMAccelerometerData *d, NSError *err) {
+    g_acc_q = [NSOperationQueue new]; g_acc_q.maxConcurrentOperationCount = 1;
+    __block double gx = 0, gy = 0, gz = 0, last = -1, peak = 0, prev = 0; __block BOOL init = NO;
+    g_acc_handler = ^(CMAccelerometerData *d, NSError *err) {
         (void)err; if (!d) return;
         CMAcceleration a = d.acceleration;
-        if (!init) { gx = a.x; gy = a.y; gz = a.z; init = YES; }
+        if (!init || (g_on_demand && d.timestamp - prev > 0.5)) { gx = a.x; gy = a.y; gz = a.z; init = YES; last = -1; }   // the first sample, or the first after the stream was stopped (motion on demand): gravity afresh
+        prev = d.timestamp;
         double dx = a.x - gx, dy = a.y - gy, dz = a.z - gz, g = sqrt(dx * dx + dy * dy + dz * dz);
         gx += (a.x - gx) * 0.02; gy += (a.y - gy) * 0.02; gz += (a.z - gz) * 0.02;
         if (g > thr) { if (last < 0) peak = 0; last = d.timestamp; peak = fmax(peak, g); }
         BOOL on = last >= 0 && d.timestamp - last < 0.12;
         if (!on && last >= 0) { LOG("front end: phone shaken (peak %.1f G)", peak); last = -1; }
         uint64_t want = on ? DM_BTN_SHAKE : 0;
-        pthread_mutex_lock(&g_mu); BOOL changed = g_shake_btn != want; g_shake_btn = want; pthread_mutex_unlock(&g_mu);
+        pthread_mutex_lock(&g_mu);
+        BOOL live = !g_on_demand || g_acc_live, changed = live && g_shake_btn != want;   // a sample queued before a stop (on demand) leaves the shake as the stop cleared it
+        if (live) g_shake_btn = want;
+        pthread_mutex_unlock(&g_mu);
         if (changed) publish();
-    }];
+    };
 }
 
 // ---- The phone's gyro ----
@@ -115,15 +124,88 @@ static void phone_motion_start(UIView *body) {
     LOG("front end: the phone's gyro drives the controller's six-axis sensor %s", mode < 0 ? "while no controller supplies fresh motion" : "always (DM_PHONE_MOTION=1)");
     g_motion.deviceMotionUpdateInterval = 1.0 / 100;
     g_motion.deviceMotionBody = body; g_motion_body = YES; LOG("front end: the phone's motion comes in the pad view's frame (deviceMotionBody)");
-    NSOperationQueue *q = [NSOperationQueue new]; q.maxConcurrentOperationCount = 1;
-    [g_motion startDeviceMotionUpdatesToQueue:q withHandler:^(CMDeviceMotion *d, NSError *err) {
+    g_dev_q = [NSOperationQueue new]; g_dev_q.maxConcurrentOperationCount = 1;
+    g_dev_handler = ^(CMDeviceMotion *d, NSError *err) {
         (void)err; if (!d) return;
         float a[3] = {(float)(d.gravity.x + d.userAcceleration.x), (float)(d.gravity.y + d.userAcceleration.y), (float)(d.gravity.z + d.userAcceleration.z)};
         float w[3] = {(float)d.rotationRate.x, (float)d.rotationRate.y, (float)d.rotationRate.z}, as[3], ws[3];
         int o = g_motion_body ? 1 : atomic_load(&g_iface_orient);   // the body's frame is already the picture's: the portrait map, which leaves it as it is
         motion_phone_to_switch(o, a, as); motion_phone_to_switch(o, w, ws);
         dm_motion_set_switch(0, as, ws);
-    }];
+    };
+}
+
+// ---- Motion on demand ----
+// The phone's two streams (the shake's accelerometer at 60 Hz, the gyro's device motion at 100 Hz: about 160 wakeups a second, the gyro and Core Motion's fusion powered) run only
+// while the game wants six-axis samples (dm_six_axis_wanted, hle_hid.c: a sensor started and not stopped, or the npad IMU on) and the app is active: a game that never reads motion
+// costs nothing, and the background costs nothing. The host's hook (on the game's thread) brings the check here at once, so a game that starts its sensor late has the phone's
+// samples as soon as Core Motion delivers its first; until then its sensor reads at rest, as the first moment of any run always did. A stop waits 2 s first, so a game that stops
+// and starts again (a scene change) keeps the streams. Controllers' own motion (GCController, motion_apple.h), Switch 2 controllers and Right Stick Motion (hle_hid.c) do not
+// depend on this. DM_MOTION_ON_DEMAND=0: both streams start with the pad view and run all session, in the background too, as before. One line says whether the game used motion
+// (the first start, and at the first trip away from the game if it has not)
+static BOOL g_sens_on, g_sens_active = YES, g_used_noted;
+static unsigned g_sens_stop_gen;
+static int g_sens_starts, g_sens_logs;
+static double g_sens_t0, g_sens_total, g_session_t0;
+static void sensors_set(BOOL on) {   // main thread
+    if (on == g_sens_on || (!g_acc_handler && !g_dev_handler)) return;
+    g_sens_on = on;
+    if (on) {
+        pthread_mutex_lock(&g_mu); g_acc_live = YES; pthread_mutex_unlock(&g_mu);
+        if (g_acc_handler) [g_motion startAccelerometerUpdatesToQueue:g_acc_q withHandler:g_acc_handler];
+        if (g_dev_handler) [g_motion startDeviceMotionUpdatesToQueue:g_dev_q withHandler:g_dev_handler];
+        g_sens_starts++; g_sens_t0 = CACurrentMediaTime();
+    } else {
+        // Samples already queued still run after the stop (Core Motion does not take them back): one that saw a shake would set it again with nothing left to clear it, so
+        // the shake's samples are shut out (g_acc_live) and the shake cleared in one step, before the stop
+        pthread_mutex_lock(&g_mu); g_acc_live = NO; BOOL held = g_shake_btn != 0; g_shake_btn = 0; pthread_mutex_unlock(&g_mu);
+        [g_motion stopAccelerometerUpdates]; [g_motion stopDeviceMotionUpdates];
+        g_sens_total += CACurrentMediaTime() - g_sens_t0;
+        if (held) publish();
+    }
+}
+static void sensors_apply(void) {   // main thread: the streams to what the game and the app's state want
+    if (!g_on_demand) return;   // the old behaviour: on from the start, never stopped
+    BOOL want = g_sens_active && dm_six_axis_wanted();
+    if (want) {
+        g_sens_stop_gen++;   // a pending stop is off
+        BOOL was = g_sens_on; sensors_set(YES);
+        if (!was && g_sens_on && g_sens_logs < 4) {
+            g_sens_logs++;
+            if (!g_used_noted) { g_used_noted = YES; LOG("front end: the game asked for motion %.1f s in: the phone's motion sensors are on", CACurrentMediaTime() - g_session_t0); }
+            else LOG("front end: the phone's motion sensors are on again (start %d)", g_sens_starts);
+        }
+        return;
+    }
+    if (!g_sens_on) return;
+    if (!g_sens_active) { sensors_set(NO); return; }   // away from the game: at once
+    unsigned gen = ++g_sens_stop_gen;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+        if (gen != g_sens_stop_gen || !g_sens_on || (g_sens_active && dm_six_axis_wanted())) return;   // !g_sens_on: already stopped (the app left meanwhile): no second line
+        sensors_set(NO);
+        if (g_sens_logs < 8) { g_sens_logs++; LOG("front end: the game stopped motion: the phone's motion sensors are off (on %.1f s in all, %d start%s)", g_sens_total, g_sens_starts, g_sens_starts == 1 ? "" : "s"); }
+    });
+}
+static void six_axis_changed(void) { dispatch_async(dispatch_get_main_queue(), ^{ sensors_apply(); }); }   // the host's hook: any thread, never blocks
+static void sensors_active(BOOL active) {   // main thread: the app became active (YES) or is resigning (NO)
+    if (!g_on_demand) return;
+    g_sens_active = active;
+    if (!active && !g_used_noted && (g_acc_handler || g_dev_handler)) { g_used_noted = YES; LOG("front end: the game has not asked for motion in its first %.0f s: the phone's motion sensors stayed off", CACurrentMediaTime() - g_session_t0); }
+    sensors_apply();
+}
+static void motion_sensors_begin(void) {   // main thread, once, after motion_start and phone_motion_start
+    const char *e = getenv("DM_MOTION_ON_DEMAND"); g_on_demand = !e || atoi(e) != 0;
+    g_session_t0 = CACurrentMediaTime();
+    if (!g_acc_handler && !g_dev_handler) return;
+    if (!g_on_demand) {
+        LOG("front end: the phone's motion sensors run all session (DM_MOTION_ON_DEMAND=0)");
+        if (g_acc_handler) [g_motion startAccelerometerUpdatesToQueue:g_acc_q withHandler:g_acc_handler];
+        if (g_dev_handler) [g_motion startDeviceMotionUpdatesToQueue:g_dev_q withHandler:g_dev_handler];
+        g_sens_on = YES; return;
+    }
+    LOG("front end: the phone's motion sensors run only while the game reads motion (DM_MOTION_ON_DEMAND)");
+    dm_six_axis_hook(six_axis_changed);
+    sensors_apply();   // a game already past its start (the view made late)
 }
 
 // ---- Layout constants (in u; x measured from the outer edge, the right half mirrors) ----
@@ -305,6 +387,7 @@ static BOOL fullOnly(int b) { return b == B_LS || b == B_RS || b >= B_LEFT; }   
         [self padsChanged:nil];
         motion_start();
         phone_motion_start(self);
+        motion_sensors_begin();
     }
     return self;
 }
@@ -1344,9 +1427,9 @@ int dm_pad_layout(void) { return g_view ? [g_view padLayout] : 0; }
 int dm_gamepad_touch_hidden(void) { return g_view ? [g_view touchHidden] : 0; }   // front_ios.m dm_setting_why: the touch rows' note in the in-game menu
 bool dm_pad_layout_offered(int layout) { return layout == 0 || layout == 1 || (layout == 2 && dm_opmode() == 0); }
 void dm_pad_layout_set(int layout) { [g_view setPadLayout:layout]; }
-void dm_gamepad_active(void) { dispatch_async(dispatch_get_main_queue(), ^{ for (GCController *c in GCController.controllers) dm_motion_rearm(c); g_s2_off = 0; dm_switch2_active(1); for (s2_pad *d = dm_switch2_pads(); d; d = d->next) s2pad_read(d); }); }   // On become active: motion_apple.h
+void dm_gamepad_active(void) { dispatch_async(dispatch_get_main_queue(), ^{ for (GCController *c in GCController.controllers) dm_motion_rearm(c); sensors_active(YES); g_s2_off = 0; dm_switch2_active(1); for (s2_pad *d = dm_switch2_pads(); d; d = d->next) s2pad_read(d); }); }   // On become active: motion_apple.h
 void dm_gamepad_reset(void) {   // On resign active: release everything (a key held while switching away and released in background gets no "release")
-    dispatch_async(dispatch_get_main_queue(), ^{ [g_view reset]; g_s2_off = 1; dm_switch2_active(0); });
+    dispatch_async(dispatch_get_main_queue(), ^{ [g_view reset]; sensors_active(NO); g_s2_off = 1; dm_switch2_active(0); });
     for (int p = 0; p < DM_PLAYERS; p++) { int s2 = 0; for (s2_pad *d = dm_switch2_pads(); d; d = d->next) if (s2pad_player(d) == p) s2 = 1; if (s2) dm_pad_set_player(p, 0, 0, 0, 0, 0); }
     pthread_mutex_lock(&g_mu); g_shake_btn = 0; pthread_mutex_unlock(&g_mu); publish();
     if (g_merge) dm_pad_set(0, 0, 0, 0, 0);

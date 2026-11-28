@@ -2,6 +2,7 @@
 // of a stand-in app with a throwaway self-signed certificate in a temporary keychain (deleted after; the login keychain and the search list are not touched)
 import CryptoKit
 import Foundation
+import Security
 import Testing
 @testable import NX_18_Beam
 
@@ -55,12 +56,17 @@ import Testing
         try await run("/usr/bin/openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", d.appending(path: "k.pem").path, "-out", d.appending(path: "c.pem").path, "-days", "2", "-config", d.appending(path: "c.cnf").path])
         try await run("/usr/bin/openssl", ["pkcs12", "-export", "-inkey", d.appending(path: "k.pem").path, "-in", d.appending(path: "c.pem").path, "-out", d.appending(path: "t.p12").path, "-passout", "pass:beamtest"])
         let before = try await Tool.run("/usr/bin/security", ["list-keychains", "-d", "user"]).out
-        try await run("/usr/bin/security", ["create-keychain", "-p", "kcpw", kc.path])
-        let list = before.split(separator: "\n").map { $0.trimmingCharacters(in: CharacterSet(charactersIn: " \"")) }.filter { !$0.isEmpty }
-        try await run("/usr/bin/security", ["list-keychains", "-d", "user", "-s"] + list)   // the user's search list as it was
-        try await run("/usr/bin/security", ["unlock-keychain", "-p", "kcpw", kc.path])
+        // Beam's own steps (BeamKeychain.ready, KeychainFile): made and unlocked in process, the partition list's password on security's stdin; none on a command line
+        #expect(try BeamKeychain.ready(at: kc, password: "kcpw") == kc)
+        #expect(try await Tool.run("/usr/bin/security", ["list-keychains", "-d", "user"]).out == before, "making it leaves the user's search list as it was")
+        _ = try await Tool.run("/usr/bin/security", ["lock-keychain", kc.path])
+        #expect(throws: KeychainFile.Failure.self) { try KeychainFile.unlock(kc, password: "not it") }
+        _ = try BeamKeychain.ready(at: kc, password: "kcpw")   // there: unlocked only
         try await run("/usr/bin/security", ["import", d.appending(path: "t.p12").path, "-k", kc.path, "-f", "pkcs12", "-P", "beamtest", "-x", "-T", "/usr/bin/codesign"])
-        try await run("/usr/bin/security", ["set-key-partition-list", "-S", "apple-tool:,apple:,codesign:", "-s", "-k", "kcpw", kc.path])
+        await #expect(throws: KeychainFile.Failure.self) { try await KeychainFile.allowCodesign(kc, password: "not it") }   // security reads the password from stdin
+        try await KeychainFile.allowCodesign(kc, password: "kcpw")
+        let src = try String(contentsOf: URL(fileURLWithPath: #filePath).deletingLastPathComponent().appending(path: "../Sources/Model/CertificateSigning.swift"), encoding: .utf8)
+        #expect(!src.contains(#""-p", pw"#) && !src.contains(#""-k", try password()"#), "no password on a security command line")
         let ids = SigningIdentity.parse(try await Tool.run("/usr/bin/security", ["find-identity", "-p", "codesigning", kc.path]).out)
         let identity = try #require(ids.first)
 
@@ -78,5 +84,32 @@ import Testing
         #expect(await MemoryEntitlements.signed(app), "both memory entitlements in the new signature")
         let after = try await Tool.run("/usr/bin/security", ["list-keychains", "-d", "user"]).out
         #expect(after == before, "the user's keychain search list is unchanged")
+    }
+}
+
+/// Making Beam's keychain puts the user's search list back also when the making fails part way (SecKeychainCreate adds the new keychain to the list first)
+@Suite struct KeychainFileTests {
+    /// The Security calls, stood in for: `n` keychains in the list; making one adds it, then reports `result`
+    enum Fake: LegacyKeychain {
+        nonisolated(unsafe) static var n = 1
+        nonisolated(unsafe) static var result: OSStatus = errSecSuccess
+        @available(macOS, deprecated: 10.10)
+        static func ref() -> SecKeychain { var k: SecKeychain?; _ = SecKeychainOpen("/nonexistent/beam-test.keychain-db", &k); return k! }   // a reference only: no file
+        @available(macOS, deprecated: 10.10)
+        static func create(_ path: String, password: [UInt8]) -> OSStatus { n += 1; return result }
+        static func unlock(_ path: String, password: [UInt8]) -> OSStatus { errSecSuccess }
+        @available(macOS, deprecated: 10.10)
+        static func searchList() -> [SecKeychain]? { (0..<n).map { _ in ref() } }
+        static func setSearchList(_ list: [SecKeychain]) -> OSStatus { n = list.count; return errSecSuccess }
+    }
+
+    @Test func searchListPutBackEvenOnFailure() {
+        let p = URL(fileURLWithPath: "/nonexistent/beam-test.keychain-db")
+        Fake.n = 1; Fake.result = errSecSuccess
+        #expect(throws: Never.self) { try KeychainFile.create(p, password: "x", calls: Fake.self) }
+        #expect(Fake.n == 1, "made: the list as it was")
+        Fake.n = 1; Fake.result = errSecIO
+        #expect(throws: KeychainFile.Failure.self) { try KeychainFile.create(p, password: "x", calls: Fake.self) }
+        #expect(Fake.n == 1, "failed part way: the list as it was all the same")
     }
 }

@@ -106,6 +106,20 @@ struct FakeCheckout {
         #expect(dirty.changes != nil && dirty.commit == afterA.commit)
         #expect(check(c, afterA) == (.nx18, .nx18), "an uncommitted host change goes into every app")
         #expect(check(c, dirty) == (nil, nil), "built with that change: current")
+        #expect(dirty.dirty == ["dm/host/main.c"], "the build keeps which files its uncommitted changes were in")
+
+        c.git("checkout", "-q", "--", "dm/host/main.c")   // the experiment reverted: the checkout is the commit again, the app still has the change
+        #expect(check(c, dirty) == (.nx18, .nx18), "built with a change that was then reverted: not current")
+        #expect(check(c, afterA) == (nil, nil), "built from the commit alone: current again")
+        var legacy = dirty; legacy.dirty = nil
+        #expect(check(c, legacy) == (.nx18, .nx18), "a record with the changes' digest but not their files: rebuild")
+
+        c.write("docs/beam.md", "Beam, an edit\n"); c.write("dm/games/\(b)/game.tsv", "name\tB2\n")   // docs and B's profile, not committed
+        let docs = NX18Git.stamp(of: c.folder)
+        c.git("checkout", "-q", "--", "docs/beam.md", "dm/games/\(b)/game.tsv")
+        #expect(check(c, docs) == (nil, .nx18), "a reverted docs edit leaves every game; a reverted edit of B's profile only B")
+
+        c.write("dm/host/main.c", "int main2;\n")
 
         c.git("checkout", "-q", "--", "dm/host/main.c")
         c.write("dm/gfx/nvn/dmsh_chain.h", "// generated\n#define DMSH_CHAIN \"bbb222\"\n"); c.commit("chain")
@@ -128,5 +142,22 @@ struct FakeCheckout {
         let s = NX18Git.stamp(of: none)
         #expect(s.commit == nil && s.chain == nil)
         #expect(NX18Git.changedPaths(none, since: "HEAD") == nil)
+    }
+}
+
+/// One rebuild check at a time (LibraryRebuilds.swift): a forced check that comes while one runs makes that one go round again; it is not dropped
+@Suite struct RebuildCheckGateTests {
+    @Test func aForcedCheckDuringOneRunsAfterIt() {
+        var g = RebuildCheckGate()
+        var steps: [Bool] = []
+        steps.append(g.begin(force: false))   // nothing running: this caller checks
+        steps.append(g.begin(force: true))    // one running: the forced caller does not start a second
+        steps.append(g.next())                // the forced check is not dropped: the running check goes round once more
+        steps.append(g.next())                // then it is over
+        #expect(steps == [true, false, true, false] && !g.running)
+        steps = [g.begin(force: true), g.begin(force: false), g.next()]   // Beam coming to the front during a check asks for no second pass
+        #expect(steps == [true, false, false])
+        steps = [g.begin(force: true), g.begin(force: true), g.begin(force: true), g.next(), g.next()]   // two forced callers during one pass: one more covers both
+        #expect(steps == [true, false, false, true, false])
     }
 }

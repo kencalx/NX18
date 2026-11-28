@@ -125,7 +125,7 @@ struct LibraryGame: Codable, Identifiable, Sendable, Equatable {
     var rebuildProgress: (done: Int, total: Int)?
     var tonight: Date?                               // Rebuild Updated Games Tonight: when it runs
     var tonightTask: Task<Void, Never>?
-    var checkingRebuilds = false
+    @ObservationIgnored var rebuildCheck = RebuildCheckGate()   // one check at a time; a forced one during it runs after it
     var lastRebuildCheck: Date?
     let settings: BeamSettings
 
@@ -237,16 +237,19 @@ struct LibraryGame: Codable, Identifiable, Sendable, Equatable {
 
     /// One run of the build script for a job: its events into the job, its end into the job's state (done, cancelled, or failed with the reason in a sentence)
     func runScript(_ job: BuildJob, _ req: BuildRequest, py: URL, checkout: NX18Checkout) async {
+        if Task.isCancelled || job.state == .cancelled { job.state = .cancelled; return }   // a Cancel during the checks before it (the git stamp, the Profile, a device's apps)
         job.state = .running
         var req = req
         if req.artFocus != nil && !checkout.knows("--art-focus") { req.artFocus = nil }   // an NX 18 from before the option stops at it: built with the middle of the art (a Mac app's framing is still written after its build)
         let stream = AsyncStream<BuildEvent>.makeStream()
         let pump = Task { @MainActor in for await e in stream.stream { job.apply(e); self.updateDock() } }
         let result: ScriptResult?
+        var cancelled = false
         let playingNow = playing != nil
         do {
             result = try await ScriptRunner.run(py, req.arguments(script: checkout.script), directory: checkout.folder, background: playingNow,
                                                 onStart: { pid in Task { @MainActor in job.pid = pid } }) { stream.continuation.yield($0) }
+        } catch is CancellationError { result = nil; cancelled = true   // cancelled before the script started: it never ran
         } catch { result = nil; job.messages.append(SayEvent(msg: "[RED] \(error.localizedDescription)")) }
         stream.continuation.finish(); await pump.value
         job.pid = nil
@@ -255,7 +258,7 @@ struct LibraryGame: Codable, Identifiable, Sendable, Equatable {
             if let art = job.art?.path { games[i].builtArt = art }
             save()
         }
-        switch result?.exit {
+        switch cancelled ? ScriptExit.interrupted : result?.exit {
         case .done?: job.state = .done
         case .interrupted?, .stopped?: job.state = .cancelled
         default: job.state = .failed(FriendlyError.text(result?.lastError ?? result.map { "The build stopped (exit code \($0.code))." } ?? "NX 18's script could not be started."))

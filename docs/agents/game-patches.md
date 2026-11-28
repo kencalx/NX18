@@ -64,6 +64,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | `build` → `engine` | Unity's constant-buffer table locked on the shared device | race | blocked: the stubs have no function-matched form yet, and no other Unity 2018.4 main on the drive shares these functions (Ori and the Blind Forest 1.0.2: no fingerprint match) | checked: probes of both threads inserting the same key and of the table API's callers by thread; Blind Forest main compared with nso_fnmap | 1 | [Ori and the Will of the Wisps](../../dm/games/01008DD013200000/README.md) | Unity 2018.4's threaded GfxDevice: the main thread registers layouts on the real device while the render thread uses the same table; any Unity 2018.4 build with this code has the race |
 | `build` → `game` | 60 fps frame step on 1.3.0 (the same stub at its known addresses) | frame rate | blocked: 1.3.0's main is on neither drive to fingerprint (v458752 is the update on them) | judgement | 1 | [Hyrule Warriors: Age of Calamity](../../dm/games/01002B00111A2000/README.md) | the stub above, placed at 1.3.0's addresses: the matched rule would serve it once its functions are fingerprinted |
 | `build` → `game` | frame-rate controller's measure judged with the host's clocks | frame rate | blocked: its MATCH_OBS rule needs the fingerprint of v458752's main (nso_match.py --gates on it), and an update's main to check it on | checked: v458752's main: the controller main+0x204a18, its one caller main+0x203718 (the controller is the frame object's +0x218), its settings in its first 0x14 bytes and the interval at +0x40 (2026-11-15) | 1 | [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md) | the game's own controller and its registers at one instruction; a fingerprint of the function would carry it to updates that keep it |
+| `build` → `game` | RenderManager::RenderFrame's billboard skeleton lookup checks the handle and skips missing bones (the Ghost Gallery crash) | runtime | blocked: NX 18 has no function-matched STUBS (upstream's MATCH_STUBS): a STUBS entry of the 1.4.0 main at upstream's offsets, its three sites' words and the handle table's address asserted | checked: upstream's: 1.0.0 and 1.4.0 mains by disassembly, full rewrites and instruction replay of every path (2026-11-28); not on the game's files here | 1 | [Luigi's Mansion 3](../../dm/games/0100DCA0064A6000/README.md) | the game's own billboard pass reads a skeleton handle without the generation check of the game's other lookups and goes on with index -1 for a missing bone hash; upstream NXNative 089c1e5b1 places it by the function's fingerprint on 1.0.0 and 1.4.0 |
 | `build` → `game` | screen shape: the sizes, the view, the layouts' projection and their edge widgets (DM_SCREEN_ASPECT) | rendering | blocked: the stubs have no function-matched form yet | judgement | 1 | [Animal Crossing: New Horizons](../../dm/games/01006F8002326000/README.md) | the output size is the host's, but where the game takes its sizes, its cameras and its layouts are this build's code |
 | `build` → `game` | Ultrawide's camera: the camera and viewport projections' aspect from the host, acknowledged after the camera stores | rendering | blocked: the projection updates have no reviewed function fingerprints yet | checked: the four sites' words by SHA-256 in main 277178b7…; ComicBit/nxnative's Mac play at 16:9 and wider (the opening cave); not run in NX 18 | 1 | [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md) | the game's four projection updates and their objects' layout; the host's ratio, the HUD squeeze and the Stretch are general host behaviour |
 | `build` → `game` | Ultrawide's camera: the scene projection's aspect from the host, acknowledged after the store | rendering | blocked: the camera update has no reviewed function fingerprint yet | checked: the site's 13 words by SHA-256 in main cd57b23f…; ComicBit/nxnative's Mac play at 16:9 and wider (outdoors, the inventory, the map); not run in NX 18 | 1 | [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) | the game's camera update and its projection's layout; the host's ratio, the HUD squeeze and the Stretch are general host behaviour |
@@ -93,7 +94,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | [Fire Emblem: Three Houses](#fire-emblem-three-houses) | 7 | 0 | 0 | 0 | 0 | `build` → `game` |
 | [Hades II](#hades-ii) | 0 | 0 | 1 | 0 | 0 | `game` |
 | [Hyrule Warriors: Age of Calamity](#hyrule-warriors-age-of-calamity) | 0 | 0 | 10 | 0 | 0 | `game`, `build` → `game` |
-| [Luigi's Mansion 3](#luigis-mansion-3) | 0 | 0 | 0 | 0 | 1 | `build` → `engine` |
+| [Luigi's Mansion 3](#luigis-mansion-3) | 0 | 0 | 3 | 0 | 1 | `build` → `game`, `build` → `engine` |
 | [Mario + Rabbids® Sparks of Hope](#mario--rabbids-sparks-of-hope) | 1 | 0 | 0 | 0 | 0 | `build` → `game` |
 | [Mario Kart World](#mario-kart-world) | 0 | 0 | 1 | 0 | 0 | `game` |
 | [Monster Hunter Rise](#monster-hunter-rise) | 0 | 0 | 0 | 0 | 1 | `build` → `engine` |
@@ -283,7 +284,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
   - cut `+0xc5ab8c`: queue pop: ldr x8, [x19] → dmb ishld (after the tail load; w8 = head)
   - cut `+0xc5ab94`: queue pop: ldr w9, [x19, #0x1c] (the head again) → and x9, x8, #0xffff
   - cut `+0xc5ab98`: queue pop: and x9, x9, #0xffff → ldr x8, [x19] (the ring; then ldr x8, [x8, x9, lsl #3]: the item)
-  - host [hle_uemalloc.c:41](../../dm/host/hle_uemalloc.c#L41): Unreal's allocator on a host malloc zone
+  - host [hle_uemalloc.c:42](../../dm/host/hle_uemalloc.c#L42): Unreal's allocator on a host malloc zone
 
 ### Catherine: Full Body
 
@@ -371,11 +372,15 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 
 ### Luigi's Mansion 3
 
-[Luigi's Mansion 3](../../dm/games/0100DCA0064A6000/README.md), `0100DCA0064A6000`.
+[Luigi's Mansion 3](../../dm/games/0100DCA0064A6000/README.md), `0100DCA0064A6000`, [patches.py](../../dm/games/0100DCA0064A6000/patches.py).
 
+- **`build` → `game`**, runtime, blocked: NX 18 has no function-matched STUBS (upstream's MATCH_STUBS): a STUBS entry of the 1.4.0 main at upstream's offsets, its three sites' words and the handle table's address asserted, checked: upstream's: 1.0.0 and 1.4.0 mains by disassembly, full rewrites and instruction replay of every path (2026-11-28); not on the game's files here: RenderManager::RenderFrame's billboard skeleton lookup checks the handle and skips missing bones (the Ghost Gallery crash). The game's own billboard pass reads a skeleton handle without the generation check of the game's other lookups and goes on with index -1 for a missing bone hash; upstream NXNative 089c1e5b1 places it by the function's fingerprint on 1.0.0 and 1.4.0
 - **`build` → `engine`**, frame rate, blocked: one game on that engine here, judgement: Next Level Games' frame limiter target at a fixed address. The studio's engine, which its other games ship
 
-- **1.4.0 `main`** `79e5950f…`
+- **1.4.0 `main`** `79e5950f…` ([patches.py:91](../../dm/games/0100DCA0064A6000/patches.py#L91))
+  - stub `+0x472354`: billboard skeleton lookup (Ghost Gallery crash): check the handle's generation, the slot pointer and the bone count first
+  - stub `+0x4723ec`: billboard skeleton lookup (Ghost Gallery crash): a missing bone hash goes to the skip, not on with index -1
+  - stub `+0x4723fc`: billboard skeleton lookup (Ghost Gallery crash): skip the component when the bone hash is not found
   - host [hle_fpslock.c:39](../../dm/host/hle_fpslock.c#L39): engine frame limit set to fps_target: NLG frame limiter target
 
 ### Mario + Rabbids® Sparks of Hope

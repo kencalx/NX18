@@ -80,6 +80,22 @@ import Testing
         let r = try await t.value
         #expect(r.exit == .stopped && stopping.get())
     }
+    /// A Cancel that comes before the script starts (while a build reads its git stamp or the Profile): the script never runs, and the run says so. Each run's
+    /// task is cancelled before it reaches the run; before the fix the cancel handler found nothing running and the script ran to its end (exit 0, a good build)
+    @Test func cancelBeforeStartNeverRuns() async throws {
+        let mark = FileManager.default.temporaryDirectory.appending(path: "beam-test-ran-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: mark) }
+        let s = try script("touch '\(mark.path)'\n")
+        let a = Task { () async throws -> ScriptResult in withUnsafeCurrentTask { $0?.cancel() }; return try await ScriptRunner.run(s, []) { _ in } }
+        await #expect(throws: CancellationError.self) { _ = try await a.value }
+        let b = Task { () async throws -> ScriptResult in withUnsafeCurrentTask { $0?.cancel() }; return try await ScriptRunner.runLines(s, []) { _ in } }
+        await #expect(throws: CancellationError.self) { _ = try await b.value }
+        let c = Task { () async throws -> Tool.Result in withUnsafeCurrentTask { $0?.cancel() }; return try await Tool.run(s.path, []) }   // an install's tools (devicectl, xcodebuild)
+        await #expect(throws: CancellationError.self) { _ = try await c.value }
+        #expect(!FileManager.default.fileExists(atPath: mark.path), "the script never ran")
+        let r = try await ScriptRunner.run(s, []) { _ in }   // control: the same script, not cancelled, runs
+        #expect(r.exit == .done && FileManager.default.fileExists(atPath: mark.path))
+    }
     @Test func missingExecutableThrows() async {
         await #expect(throws: (any Error).self) { try await ScriptRunner.run(URL(fileURLWithPath: "/nonexistent/beam-python"), []) { _ in } }
     }

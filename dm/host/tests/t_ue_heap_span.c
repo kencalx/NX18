@@ -13,6 +13,7 @@ int main(void) {
     uint8_t *blocks[count];
     g_zone = malloc_create_zone(0, 0);
     assert(g_zone);
+    zone_ready();   // DM_UE_HEAP_FAST (the Makefile runs both)
     for (unsigned i = 0; i < count; ++i) {
         blocks[i] = m_Malloc(NULL, span + (i % 2) * 4096, (i % 4 < 2) ? 4096 : 0);
         assert(((uintptr_t)(blocks[i] + 0x2a0) & ~(uintptr_t)(span - 1)) == (uintptr_t)blocks[i]);
@@ -49,7 +50,7 @@ int main(void) {
         m_Free(NULL, less);
     }
     late_flush();
-    assert(atomic_load(&g_used) == 0);
+    assert(used_now() == 0);
     malloc_destroy_zone(g_zone);
     puts("Unreal virtual-span alignment and realloc contents passed");
     return 0;

@@ -39,7 +39,7 @@ class Committed(unittest.TestCase):
         rows = [ln for ln in self.lines if not ln.startswith('#')]   # as the host splits them: a '\r' would stay in the row
         keep, bad = pso_seed.collect(rows, self.shmap)
         self.assertEqual((bad, len(keep)), ([], len(rows)))
-        self.assertEqual(pso_seed.counts(keep), {'S': 12874, 'R': 10401, 'C': 67, 'M': 0, 'rows': 23342})
+        self.assertEqual(pso_seed.counts(keep), {'S': 12874, 'R': 13256, 'C': 78, 'M': 0, 'rows': 26208})
 
     def test_the_mac_rows_then_the_iphone_rows(self):
         mac = [ln for ln in self.lines[:self.note] if not ln.startswith('#')]
@@ -51,9 +51,11 @@ class Committed(unittest.TestCase):
         up = next(i for i, ln in enumerate(self.lines) if ln.startswith('# Added on 2026-11-27 from upstream NXNative 0a57ea236'))   # upstream's inbox rows (morning check)
         r4rows = [ln for ln in self.lines[r4:r5] if not ln.startswith('#')]
         r5rows = [ln for ln in self.lines[r5:up] if not ln.startswith('#')]
-        up2 = next(i for i, ln in enumerate(self.lines) if ln.startswith("# Added on 2026-11-27 from upstream NXNative's list at 1a54371cf"))   # the second check's rows, last
+        up2 = next(i for i, ln in enumerate(self.lines) if ln.startswith("# Added on 2026-11-27 from upstream NXNative's list at 1a54371cf"))   # the second check's rows
+        up3 = next(i for i, ln in enumerate(self.lines) if ln.startswith("# Added on 2026-11-28 from upstream NXNative's list at 7bc66e5a3"))   # the third check's rows, last
         uprows = [ln for ln in self.lines[up:up2] if not ln.startswith('#')]
-        up2rows = [ln for ln in self.lines[up2:] if not ln.startswith('#')]
+        up2rows = [ln for ln in self.lines[up2:up3] if not ln.startswith('#')]
+        up3rows = [ln for ln in self.lines[up3:] if not ln.startswith('#')]
         self.assertEqual(pso_seed.counts(mac), {'S': 819, 'R': 960, 'C': 10, 'M': 0, 'rows': 1789})
         self.assertEqual(pso_seed.counts(phone), {'S': 4070, 'R': 392, 'C': 5, 'M': 0, 'rows': 4467})
         self.assertEqual(pso_seed.counts(x1), {'S': 38, 'R': 197, 'C': 0, 'M': 0, 'rows': 235})
@@ -72,6 +74,9 @@ class Committed(unittest.TestCase):
         self.assertEqual(pso_seed.counts(up2rows), {'S': 6647, 'R': 8164, 'C': 48, 'M': 0, 'rows': 14859})
         self.assertIn('14859 rows (6647 S, 8164 R, 48 C)', self.lines[up2])
         self.assertFalse((above | {pso_seed.identity(r) for r in uprows}) & {pso_seed.identity(r) for r in up2rows}, 'the second check repeats none above it')
+        self.assertEqual(pso_seed.counts(up3rows), {'S': 0, 'R': 2855, 'C': 11, 'M': 0, 'rows': 2866})   # only rows new upstream since 1a54371cf, no S rows (28d41fc9d)
+        self.assertIn('2866 rows (0 S, 2855 R, 11 C)', self.lines[up3])
+        self.assertFalse((above | {pso_seed.identity(r) for r in uprows + up2rows}) & {pso_seed.identity(r) for r in up3rows}, 'the third check repeats none above it')
         lengths = [len(r.split('\t')[1]) for r in x1 if r.startswith('R\t')]
         self.assertEqual((lengths[:66].count(1008), lengths[66:].count(1024)), (66, 131), 'the later 0.5 rows, then X1.0\'s with the border field')
 
@@ -91,7 +96,7 @@ class Committed(unittest.TestCase):
 
     def test_compute_rows_are_map_compute_shaders(self):
         c = [ln.split('\t')[1] for ln in self.lines if ln.startswith('C\t')]
-        self.assertEqual(len(c), 67)
+        self.assertEqual(len(c), 78)
         self.assertTrue(all(self.shmap.get(k[:-2]) == 'compute' for k in c))
 
 

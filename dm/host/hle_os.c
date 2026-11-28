@@ -36,17 +36,23 @@ void *objmap_del(const void *k) {
     pthread_mutex_unlock(&g_om_lock);
     return r;
 }
+// Ticks to ns by a multiply that gives the divide's result bit for bit (dm_tbconv.h; DM_NOW_MUL=0: the divide on every read, as before). The table is filled at load (or by the
+// first read, if another constructor reads the clock first: any racing fill writes the same values), and the switch is read again at host start (dm_now_ns_config, main.c), after the env files: the two fills differ only in mul, and
+// either way the result is the same
+#include "dm_tbconv.h"
+static dm_tbconv_t g_tbc;
+static void tbc_fill(int mul) { mach_timebase_info_data_t tb; mach_timebase_info(&tb); dm_tbconv_t c; dm_tbconv_init(&c, tb.numer, tb.denom, mul); g_tbc = c; }
+__attribute__((constructor)) static void tbc_load(void) { const char *e = getenv("DM_NOW_MUL"); tbc_fill(!e || atoi(e) != 0); }
+void dm_now_ns_config(void) { tbc_load(); }
 uint64_t now_ns(void) {
-    static mach_timebase_info_data_t tb;
-    if (!tb.denom) mach_timebase_info(&tb);
-    return mach_absolute_time() * tb.numer / tb.denom;
+    if (__builtin_expect(!g_tbc.numer, 0)) tbc_fill(1);
+    return dm_tbconv(&g_tbc, mach_absolute_time());
 }
 // The same, counting the time the device sleeps too (mach_continuous_time; mach_absolute_time, now_ns, stops while it sleeps, as it does with the phone locked): for
 // timers that must span a break, the heat hold's (hle_nvn.c thermal_capped). Frame times stay on now_ns
 uint64_t now_cont_ns(void) {
-    static mach_timebase_info_data_t tb;
-    if (!tb.denom) mach_timebase_info(&tb);
-    return mach_continuous_time() * tb.numer / tb.denom;
+    if (__builtin_expect(!g_tbc.numer, 0)) tbc_fill(1);
+    return dm_tbconv(&g_tbc, mach_continuous_time());
 }
 // Guest clock: the system counters the guest can read (mrs cntpct gate, svc GetSystemTick) all go through here. Default = now_ns().
 // Freeze (only for the test driver DM_TICK_HOLD): while frozen the guest clock does not advance ⇒ the game's next tick never comes due; after unfreezing the frozen duration is subtracted, the guest clock is continuous with no jump

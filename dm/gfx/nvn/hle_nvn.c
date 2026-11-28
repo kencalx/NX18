@@ -1250,9 +1250,26 @@ static void ctl_chunk_close(cmd_t *o) {
     o->chunk = NULL;
 }
 NVN(nvnCommandBufferAddControlMemory, void, NVNcommandBuffer *c, void *m, size_t n) { ctl_set(CB(c), m, n); }
-// Get space for one record; if not enough, call back into the game per the NVN convention to add command memory. The record joins the recording's open piece of the control list
-static uint8_t *cmd_alloc(cmd_t *o, uint32_t size) {
+// DM_NVN_REC_FAST (default; upstream NXNative 6ccaca8e2, slice 1 of PR #3344): a record that fits in the open piece of a recording already under way takes the few stores the full path
+// would make for it (cmd_alloc's fast case), and a compact record zeroes only its padding, as every caller writes its whole payload (crec). =0: every record through the full paths, as before
+static int g_rec_fast = -1;
+static __attribute__((noinline, cold)) int rec_fast_init(void) { const char *e = getenv("DM_NVN_REC_FAST"); g_rec_fast = !(e && !strcmp(e, "0")); if (!g_rec_fast) LOG("DM_NVN_REC_FAST=0: every NVN command record takes the full allocation path and zeroes its whole payload, as before"); return g_rec_fast; }
+static inline int rec_fast(void) { return __builtin_expect(g_rec_fast >= 0, 1) ? g_rec_fast : rec_fast_init(); }
+static uint8_t *cmd_alloc_full(cmd_t *o, uint32_t size);
+// Get space for one record; if not enough, call back into the game per the NVN convention to add command memory. The record joins the recording's open piece of the control list.
+// The fast case is what the full path does when the record fits in the segment, the recording has its first byte and an open piece this record leaves within CTL_CHUNK_MAX, no
+// control entry waits to be written (ctl_q[1]) and no command statistics are taken: the header, cur and used, and nothing else
+static inline __attribute__((always_inline)) uint8_t *cmd_alloc(cmd_t *o, uint32_t size) {
     size = (size + 7) & ~7u;
+    uint8_t *p = o->cur;
+    if (__builtin_expect(rec_fast() && o->recording == 1 && p && size <= (size_t)(o->end - p) && p < o->end && o->chunk && o->own_back && !o->ctl_q[1] && g_cs.on == 0
+                         && (uint64_t)(p + size - o->chunk) <= CTL_CHUNK_MAX, 1)) {
+        o->cur = p + size; o->used += size; op_hdr h = {0, size}; memcpy(p, &h, sizeof h);
+        return p;
+    }
+    return cmd_alloc_full(o, size);
+}
+static __attribute__((noinline)) uint8_t *cmd_alloc_full(cmd_t *o, uint32_t size) {
     for (int tries = 0; !o->cur || o->cur + size > o->end; tries++) {
         // The record goes here in the game's count, though it does not fit: a lent segment hanging off this position belongs to a dead list (see hostseg_take)
         if (o->recording && o->cur && o->cur < o->end) { cmd_own_at(o, o->cur); hostseg_written(o, o->cur, 1); }
@@ -1440,9 +1457,10 @@ static void *rec(NVNcommandBuffer *c, uint32_t op, size_t payload) {
 // BindUniformBuffer (24; 20), BindDepthStencilState (16 + 8; 8), BindColorState (16; 12), SetScissor (24; 12), SetPrimitiveRestart (16; 12), SetBlendColor (24; 20).
 // Tests set g_rec_compact to 0 to record the canonical forms and compare them with the expanded compact ones
 static int g_rec_compact = 1;
-static uint8_t *crec(NVNcommandBuffer *c, uint32_t opc, uint32_t args, size_t payload) {
+static uint8_t *crec(NVNcommandBuffer *c, uint32_t opc, uint32_t args, size_t payload) {   // every caller writes the whole payload (DM_NVN_REC_FAST: only the padding after it is zeroed)
     uint32_t sz = (uint32_t)((8 + payload + 7) & ~(size_t)7);
-    uint8_t *p = cmd_alloc(CB(c), sz); put_hdr(p, opc | args << 8, sz); memset(p + 8, 0, sz - 8);
+    uint8_t *p = cmd_alloc(CB(c), sz); put_hdr(p, opc | args << 8, sz);
+    if (rec_fast()) { size_t pad = (size_t)sz - 8 - payload; if (pad) memset(p + 8 + payload, 0, pad); } else memset(p + 8, 0, sz - 8);
     return p + 8;
 }
 static void put32(uint8_t **q, uint32_t v) { memcpy(*q, &v, 4); *q += 4; }
@@ -3263,9 +3281,10 @@ static void power_line(uint64_t frame) {
         if (fs_ != pfs || fr != pfr || ft != pft) LOG("[nvn] same-pass feedback up to frame %llu, per frame: %.1f snapshots taken, %.1f draws reused one, %.1f read the tile (%.1f waited for their pipeline)",
             frame, (fs_ - pfs) / nf, (fr - pfr) / nf, (ft - pft) / nf, (fw - pfw) / nf);
         pfs = fs_; pfr = fr; pft = ft; pfw = fw;
-        { void mtl_rfp_stats(uint64_t v[5]); static uint64_t prf[5]; uint64_t rf[5]; mtl_rfp_stats(rf);   // the replay's per-draw fast paths (nvn_mtl.m: DM_NVN_FB_STOR, DM_NVN_PSO_MEMO, DM_NVN_MTK_KEEP), both sides of each A/B
-          if (memcmp(rf, prf, sizeof rf)) LOG("[nvn] replay fast paths up to frame %llu, per frame: feedback storage checks lock-free %.1f, under the lock %.1f (DM_NVN_FB_STOR); pipeline lookups from the program's slot %.1f, hashed %.1f (DM_NVN_PSO_MEMO); task / mesh draws that kept their fragment block %.1f (DM_NVN_MTK_KEEP)",
-              frame, (rf[0] - prf[0]) / nf, (rf[1] - prf[1]) / nf, (rf[2] - prf[2]) / nf, (rf[3] - prf[3]) / nf, (rf[4] - prf[4]) / nf);
+        { void mtl_rfp_stats(uint64_t v[16]); static uint64_t prf[16]; uint64_t rf[16]; mtl_rfp_stats(rf);   // the replay's per-draw fast paths (nvn_mtl.m: DM_NVN_FB_STOR, DM_NVN_PSO_MEMO, DM_NVN_MTK_KEEP, DM_NVN_HTAB_ARENA, DM_NVN_PC_LAST), both sides of each A/B
+          if (memcmp(rf, prf, sizeof rf)) LOG("[nvn] replay fast paths up to frame %llu, per frame: feedback storage checks lock-free %.1f, under the lock %.1f (DM_NVN_FB_STOR); pipeline lookups from the program's slot %.1f, hashed %.1f (DM_NVN_PSO_MEMO); task / mesh draws that kept their fragment block %.1f (DM_NVN_MTK_KEEP); "
+              "handle tables built %.1f, written again into a new submission's arena %.1f (DM_NVN_HTAB_ARENA); pool lookups the last entry answered %.1f (DM_NVN_PC_LAST); feedback depth looks %.1f and walks %.1f answered by a kept finding (DM_NVN_FB_SCAN_CACHE); uniform size tables reused %.1f (DM_NVN_CBSIZE_REUSE)",
+              frame, (rf[0] - prf[0]) / nf, (rf[1] - prf[1]) / nf, (rf[2] - prf[2]) / nf, (rf[3] - prf[3]) / nf, (rf[4] - prf[4]) / nf, (rf[5] - prf[5]) / nf, (rf[6] - prf[6]) / nf, (rf[7] - prf[7]) / nf, (rf[8] - prf[8]) / nf, (rf[9] - prf[9]) / nf, (rf[10] - prf[10]) / nf);
           memcpy(prf, rf, sizeof prf); }
         static uint64_t pps[POOL_STATS]; uint64_t ps[POOL_STATS]; mtl_pool_stats(ps);   // the tables of handles traced to no slot (nvn_mtl.m pool_gpu)
         void mtl_pool_spare_stats(uint64_t s[5]); static uint64_t pss[5]; uint64_t ss[5] = {0}; char psp[160] = "";   // the tables made and reused, the spares (nvn_mtl.m pool_table_give), for a profile with replay_spares (on or turned off, so both sides of the A/B have it) or DM_REPLAY_SPARES=1; every other game's line as before

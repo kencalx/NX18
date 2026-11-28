@@ -133,6 +133,7 @@ enum { NQ_POOL_MAX=1024 };
 static nq_node *nq_node_pool; static nq_receipt *nq_receipt_pool; static unsigned nq_node_npool, nq_receipt_npool;
 static int nq_pool=-1;   // 1 free lists and inline signal, 0 off (a unit test may set it directly)
 static _Atomic uint64_t nq_stat_nodes, nq_stat_nodes_pooled, nq_stat_receipts, nq_stat_receipts_pooled, nq_stat_no_spare;
+static _Atomic uint64_t nq_stat_bulk_runs, nq_stat_bulk_recs;   // DM_NVN_NQ_BULK: runs copied whole into a node and the records in them (plain and compact), for the queue line
 static int nq_pooled(void) {
     if(nq_pool<0) { const char *e=getenv("DM_NVN_NODE_POOL"); int on=!(e && !strcmp(e,"0")); if(!on) LOG("[nvn] queue nodes and receipts allocated one by one (DM_NVN_NODE_POOL=0)"); nq_pool=on; }
     return nq_pool;
@@ -351,14 +352,15 @@ static uint64_t nq_report_due(uint64_t frame,uint64_t *reported) {
 // started without a spare copy (they allocate it as they grow), the GPU event writes recorded (nq_event_issued) and the time this bookkeeping took on the replay thread and in GPU progress,
 // with the event words in flight now and the most at once since the start, counted with the map and with the list (DM_NVN_EVENT_MAP=0) alike
 static void nq_report(uint64_t frame,uint64_t frames) {
-    static uint64_t p[11]; uint64_t v[11]={atomic_load(&nq_stat_nodes),atomic_load(&nq_stat_nodes_pooled),atomic_load(&nq_stat_receipts),atomic_load(&nq_stat_receipts_pooled),atomic_load(&nq_stat_no_spare),atomic_load(&nq_stat_event_writes),atomic_load(&nq_stat_event_ns),
-                                          atomic_load(&nq_stat_yields),atomic_load(&nq_stat_yield_copies),atomic_load(&nq_stat_yield_ns),atomic_load(&nq_stat_yield_timeouts)};
+    static uint64_t p[13]; uint64_t v[13]={atomic_load(&nq_stat_nodes),atomic_load(&nq_stat_nodes_pooled),atomic_load(&nq_stat_receipts),atomic_load(&nq_stat_receipts_pooled),atomic_load(&nq_stat_no_spare),atomic_load(&nq_stat_event_writes),atomic_load(&nq_stat_event_ns),
+                                          atomic_load(&nq_stat_yields),atomic_load(&nq_stat_yield_copies),atomic_load(&nq_stat_yield_ns),atomic_load(&nq_stat_yield_timeouts),atomic_load(&nq_stat_bulk_runs),atomic_load(&nq_stat_bulk_recs)};
     pthread_mutex_lock(&nq_mu); unsigned peak=nq_stat_event_peak, inflight=nq_event_inflight(); pthread_mutex_unlock(&nq_mu);
     double nf=frames?(double)frames:1;
     char sp[96]=""; if(nvn_replay_spares()) snprintf(sp,sizeof sp," (spare copies kept %llu of %d, %.2f MB)",(unsigned long long)atomic_load_explicit(&nq_stat_spares,memory_order_relaxed),nq_spare_n(),atomic_load_explicit(&nq_stat_spare_bytes,memory_order_relaxed)/1048576.0);   // replay_spares only: every other game's line as before
     char ly[160]=""; if(nq_yield_on()) snprintf(ly,sizeof ly,"; g_sub_mu lent to the game's submits mid-node %.1f (%.1f copies, %.1f not taken), the replay without it %.3f ms",(v[7]-p[7])/nf,(v[8]-p[8])/nf,(v[10]-p[10])/nf,(v[9]-p[9])/1e6/nf);   // DM_NVN_SUB_YIELD=0: the line as before
-    LOG("[nvn] queue up to frame %llu, per frame: nodes %.1f (%.1f from the free list), receipts %.1f (%.1f from the free list), command nodes without a spare copy %.1f%s; GPU event writes %.1f, their bookkeeping %.3f ms; event words in flight %u, at most %u%s",
-        frame,(v[0]-p[0])/nf,(v[1]-p[1])/nf,(v[2]-p[2])/nf,(v[3]-p[3])/nf,(v[4]-p[4])/nf,sp,(v[5]-p[5])/nf,(v[6]-p[6])/1e6/nf,inflight,peak,ly);
+    char bk[96]=""; if(v[11]!=p[11]) snprintf(bk,sizeof bk,"; record runs copied whole %.1f (%.1f records, DM_NVN_NQ_BULK)",(v[11]-p[11])/nf,(v[12]-p[12])/nf);   // DM_NVN_NQ_BULK=0: the line as before
+    LOG("[nvn] queue up to frame %llu, per frame: nodes %.1f (%.1f from the free list), receipts %.1f (%.1f from the free list), command nodes without a spare copy %.1f%s; GPU event writes %.1f, their bookkeeping %.3f ms; event words in flight %u, at most %u%s%s",
+        frame,(v[0]-p[0])/nf,(v[1]-p[1])/nf,(v[2]-p[2])/nf,(v[3]-p[3])/nf,(v[4]-p[4])/nf,sp,(v[5]-p[5])/nf,(v[6]-p[6])/1e6/nf,inflight,peak,ly,bk);
     memcpy(p,v,sizeof p);
 }
 // The replay's time-constraint policy (nvn_rt.h; profile key replay_rt, DM_REPLAY_RT): ticked once a frame before the node's work, outside its cost scope
@@ -366,6 +368,7 @@ static uint64_t nq_oldest(void) { uint64_t o=UINT64_MAX; for(nq_queue *q=nq_queu
 static nvn_rtw nq_rtw={.name="NVN queue replay"};
 static void *nq_worker(void *unused) {
     (void)unused; pthread_setname_np("NVN queue replay");
+    void mtl_pc_claim(void); mtl_pc_claim();   // its pool lookup table is a plain global (nvn_mtl.m DM_NVN_PC_LAST)
     pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE,0);
     uint64_t frame=UINT64_MAX, reported=UINT64_MAX; const int rt=nvn_replay_rt();
     for(;;) {
@@ -469,20 +472,23 @@ static void nq_start(void) { nq_yield_init(); pthread_t t; if(pthread_create(&t,
 static nq_node *nq_append(nq_job *j,unsigned kind) { nq_node *n=nq_node_new(); n->kind=kind; if(j->last) j->last->next=n; else j->first=n; j->last=n; return n; }
 // A node's command copy grows by doubling (from 4 KB): growing 4 KB at a time took a reallocation for every 4 KB, each possibly a copy of all before it, under g_sub_mu.
 // The size addition is checked before allocating (upstream 2a67900bf)
-static void nq_bytes(nq_node *n, const void *bytes, size_t length) {
+static __attribute__((noinline, cold)) void nq_grow(nq_node *n, size_t want) {
+    size_t cap = n->capacity <= SIZE_MAX / 2 ? 2 * n->capacity : want;
+    cap = cap < want ? want : cap;
+    if (cap < 4096) cap = 4096;
+    void *grown = realloc(n->bytes, cap);
+    if (!grown) die("queue commands allocation failed");
+    n->bytes = grown;
+    n->capacity = cap;
+}
+static inline void nq_reserve(nq_node *n, size_t length) {
     if (length > SIZE_MAX - n->length) die("queue commands allocation overflow");
-    size_t want = n->length + length;
-    if (want > n->capacity) {
-        size_t cap = n->capacity <= SIZE_MAX / 2 ? 2 * n->capacity : want;
-        cap = cap < want ? want : cap;
-        if (cap < 4096) cap = 4096;
-        void *grown = realloc(n->bytes, cap);
-        if (!grown) die("queue commands allocation failed");
-        n->bytes = grown;
-        n->capacity = cap;
-    }
+    if (n->length + length > n->capacity) nq_grow(n, n->length + length);
+}
+static void nq_bytes(nq_node *n, const void *bytes, size_t length) {
+    nq_reserve(n, length);
     memcpy(n->bytes + n->length, bytes, length);
-    n->length = want;
+    n->length += length;
 }
 // Where a GPU event signal leaves the commands around it (profile key signal_events; DM_NVN_SIGNAL_EVENTS=node / split overrides it). node (the default, upstream's behaviour since
 // issue #2112): the signal stays inside its node, which goes on to the next wait (WAIT_EVENT, WAIT_SYNC), FENCE_SYNC or the end of the submitted commands, and the node's signals publish in
@@ -573,6 +579,20 @@ static void nq_record(nq_job *j,const uint8_t *p,op_hdr h) {
     uint8_t x[REC_EXPAND_MAX] __attribute__((aligned(8))); size_t n=rec_expand(p,x);
     for(size_t o=0;o<n;) { op_hdr c; memcpy(&c,x+o,8); nq_record_one(j,x+o,c); o+=c.size; }
 }
+// DM_NVN_NQ_BULK (default; upstream NXNative 6ccaca8e2, slice 1 of PR #3344): a run of records that nq_record_one would only copy goes into the node in one copy, and a run of compact
+// records is expanded straight into the node, not into a buffer on the stack and then record by record. A plain record is one whose cap_rec_fields walk names no object the queue
+// snapshots (CAP_K_PROG / CAP_K_TEX: nq_snapshot_object) and that neither cuts the job (waits, fences, signals: nq_signals_in_node stays on that path) nor is refused there (END, JUMP,
+// CALL; OP_MULTI_DRAW's and OP_BIND_VBUF's fields are checked there: the recorder never makes a bad one, and a recorded-over piece's still dies as before). The list is NX 18's own op list (upstream's 65-op mask has five ops NX 18 lacks and orders OP_DEPTH_BOUNDS last); t_nvn walks every op
+// through cap_rec_fields to check it. =0: every record through nq_record, as before
+_Static_assert(OP_COUNT_ == 60 && OP_COUNT_ <= 64, "nvn_queue.inc: a record op was added or removed: decide whether NQ_SPECIAL takes it");
+#define NQ_SPECIAL ((1ull << OP_END) | (1ull << OP_JUMP) | (1ull << OP_CALL) | (1ull << OP_WAIT_EVENT) | (1ull << OP_WAIT_SYNC) | (1ull << OP_FENCE_SYNC) | (1ull << OP_SIGNAL_EVENT) | \
+                    (1ull << OP_SET_RT) | (1ull << OP_BIND_PROGRAM) | (1ull << OP_COPY_B2T) | (1ull << OP_COPY_T2B) | (1ull << OP_COPY_T2T) | (1ull << OP_CLEAR_TEX) | (1ull << OP_DLSS) | \
+                    (1ull << OP_MULTI_DRAW) | (1ull << OP_BIND_VBUF))
+static inline int nq_plain_op(uint32_t op) { return op < OP_COUNT_ && !(NQ_SPECIAL >> op & 1); }   // a compact record's op has its arguments above bit 8: never plain
+static int nq_bulk=-1;   // a unit test may set it directly
+static int nq_bulk_on(void) { if(nq_bulk<0) { const char *e=getenv("DM_NVN_NQ_BULK"); nq_bulk=!(e && !strcmp(e,"0")); if(!nq_bulk) LOG("DM_NVN_NQ_BULK=0: every NVN record is copied into the queue one by one, as before"); } return nq_bulk; }
+// The job's open command node, made (with a spare command copy) if there is none, as nq_record_one makes it
+static nq_node *nq_open_commands(nq_job *j) { nq_node *n=j->last; if(!n || n->kind!=NQ_COMMANDS || n->closed) { n=nq_append(j,NQ_COMMANDS); nq_spare_take(n); } return n; }
 // A handle is the recording's control list (nvn_obj.h ctl_e): its pieces of records, its links to more control memory. Calls were copied in when they were recorded.
 // A piece runs what its command memory holds at submit, as the GPU runs a command set's bytes: the records that fit in it (nvn_piece_record). A game may record over a called
 // recording before the list that calls it is submitted (docs/reference/nvn-objects.md, "A called recording recorded over before its caller is submitted")
@@ -582,7 +602,19 @@ static void nq_flatten(nq_job *j,const uint8_t *list) {
         if(k==CTL_LINK) { e=ctl_addr(v)-8; continue; }
         if(k!=CTL_CHUNK) die("NVN command list %p: corrupt control entry %#llx at %p",(const void *)list,(unsigned long long)v,(const void *)e);
         const uint8_t *p=ctl_addr(v),*pe=p+ctl_chunk_bytes(v); op_hdr h;
-        while(nvn_piece_record(list,v,p,pe,&h)) { nq_record(j,p,h); p+=h.size; }
+        if(!nq_bulk_on()) { while(nvn_piece_record(list,v,p,pe,&h)) { nq_record(j,p,h); p+=h.size; } }
+        else for(int have=nvn_piece_record(list,v,p,pe,&h);have;) {
+            if(nq_plain_op(h.op)) {   // a run of plain records: one copy
+                const uint8_t *run=p; uint64_t k=0;
+                do { p+=h.size; k++; have=nvn_piece_record(list,v,p,pe,&h); } while(have && nq_plain_op(h.op));
+                nq_node *n=nq_open_commands(j); nq_bytes(n,run,(size_t)(p-run));
+                atomic_fetch_add_explicit(&nq_stat_bulk_runs,1,memory_order_relaxed); atomic_fetch_add_explicit(&nq_stat_bulk_recs,k,memory_order_relaxed);
+            } else if(rec_compact(h.op)) {   // a run of compact records: expanded in place (rec_expand writes what it wrote to the stack before)
+                nq_node *n=nq_open_commands(j); uint64_t k=0;
+                do { nq_reserve(n,REC_EXPAND_MAX); n->length+=rec_expand(p,n->bytes+n->length); p+=h.size; k++; have=nvn_piece_record(list,v,p,pe,&h); } while(have && rec_compact(h.op));
+                atomic_fetch_add_explicit(&nq_stat_bulk_runs,1,memory_order_relaxed); atomic_fetch_add_explicit(&nq_stat_bulk_recs,k,memory_order_relaxed);
+            } else { nq_record_one(j,p,h); p+=h.size; have=nvn_piece_record(list,v,p,pe,&h); }
+        }
         if(v&CTL_LAST) return;
     }
 }

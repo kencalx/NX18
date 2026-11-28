@@ -511,7 +511,7 @@ struct LauncherView: View {
         check += 1; checking = true; asking = nil; held = nil   // a held answer is old: this Play checks again
         let mine = check
         dm_cloud_saves_env()   // DM_SAVE_SYNC from the picked folder, as the game's mount will read it (front_ios.m calls it again at the start)
-        dm_profile_env()       // the Profile's name and picture for the games (NX18Profile.swift); an env.txt value wins
+        NX18Profile.shared.envForPlay()   // the Profile's name and picture for the games (NX18Profile.swift); an env.txt value wins; startGame's dm_profile_env then skips its look
         setenv("DM_PLAY_PRESET", m.activePreset?.rawValue ?? "custom", 1)   // the play record's preset for this session (PlayRecord.swift)
         DispatchQueue.global(qos: .userInitiated).async {
             let r = Self.compare()
@@ -644,7 +644,7 @@ struct LauncherView: View {
         // getenv, not ProcessInfo.environment: main.m sets DM_SAVE and applies env.txt after that snapshot
         guard let save = getenv("DM_SAVE") else { fputs("launcher: save sync: no DM_SAVE\n", stderr); return nil }
         guard let line = SaveSyncReport.run({ save_sync_report(save, dm_save_title(), nil, SaveSyncReport.waitMs, $0, $1) }) else {
-            fputs("launcher: save sync: no report on \(String(cString: save))\n", stderr)
+            fputs("launcher: save sync: no report on \((String(cString: save) as NSString).abbreviatingWithTildeInPath)\n", stderr)   // the app's own folder as ~, never the full path
             return nil
         }
         fputs("launcher: save sync: \(line)\n", stderr)

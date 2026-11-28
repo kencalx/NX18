@@ -31,8 +31,8 @@ class Committed(unittest.TestCase):
         rows = [ln for ln in self.lines if not ln.startswith('#')]   # as the host splits them: a '\r' would stay in the row
         keep, bad = pso_seed.collect(rows, self.shmap)
         self.assertEqual((bad, len(keep)), ([], len(rows)))
-        self.assertEqual(pso_seed.counts(keep), {'S': 6552, 'R': 7441, 'C': 211, 'M': 14, 'rows': 14218})
-        self.assertEqual(len({pso_seed.identity(r) for r in rows}), 14218)
+        self.assertEqual(pso_seed.counts(keep), {'S': 6552, 'R': 9417, 'C': 222, 'M': 14, 'rows': 16205})
+        self.assertEqual(len({pso_seed.identity(r) for r in rows}), 16205)
         self.assertEqual(pso_seed.counts(keep[:6563]), {'S': 4900, 'R': 1526, 'C': 125, 'M': 12, 'rows': 6563})   # the X1.0 recording first
         grown = next(ln for ln in self.lines if ln.startswith('# Grown on 2026-11-16'))
         self.assertIn('2404 rows (652 S, 1733 R, 19 C)', grown)
@@ -44,10 +44,14 @@ class Committed(unittest.TestCase):
         self.assertIn('4146 rows (769 S, 3320 R, 55 C), 2 M', up)
         self.assertEqual(pso_seed.counts(keep[9927:14073]), {'S': 769, 'R': 3320, 'C': 55, 'M': 2, 'rows': 4146})
         for c in ('d2a2a43d7', 'fc2a15d03', 'c4e3ef3a1', '044805078', '2bc609e00', 'the 35 rows'): self.assertIn(c, up)
-        up2 = next(ln for ln in self.lines if ln.startswith("# Added on 2026-11-27 from upstream NXNative's list at 1a54371cf"))   # the second check's rows, last
+        up2 = next(ln for ln in self.lines if ln.startswith("# Added on 2026-11-27 from upstream NXNative's list at 1a54371cf"))   # the second check's rows
         self.assertIn('145 rows (28 S, 117 R, 0 C), 0 M', up2)
         self.assertIn('35 of upstream\'s rows refused', up2)
-        self.assertEqual(pso_seed.counts(keep[14073:]), {'S': 28, 'R': 117, 'C': 0, 'M': 0, 'rows': 145})
+        self.assertEqual(pso_seed.counts(keep[14073:14218]), {'S': 28, 'R': 117, 'C': 0, 'M': 0, 'rows': 145})
+        up3 = next(ln for ln in self.lines if ln.startswith("# Added on 2026-11-28 from upstream NXNative's list at 7bc66e5a3"))   # the third check's rows, last
+        self.assertIn('1987 rows (0 S, 1976 R, 11 C), 0 M', up3)
+        for c in ('3d6b4975b', '16b2da9b1', '7d398f7a9', '717e51f07', '22 refused rows'): self.assertIn(c, up3)
+        self.assertEqual(pso_seed.counts(keep[14218:]), {'S': 0, 'R': 1976, 'C': 11, 'M': 0, 'rows': 1987})   # only rows new upstream since 1a54371cf, no S rows (28d41fc9d)
 
     def test_header_counts_and_source(self):
         head = [ln for ln in self.lines if ln.startswith('#')]
@@ -64,7 +68,7 @@ class Committed(unittest.TestCase):
 
     def test_compute_rows_are_map_compute_shaders(self):
         c = [ln.split('\t')[1] for ln in self.lines if ln.startswith('C\t')]
-        self.assertEqual(len(c), 211)
+        self.assertEqual(len(c), 222)
         self.assertTrue(all(self.shmap.get(k[:-2]) == 'compute' for k in c))
 
     def test_mesh_rows_are_map_task_mesh_pipelines(self):

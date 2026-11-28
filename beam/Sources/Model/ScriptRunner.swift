@@ -44,7 +44,9 @@ enum ScriptRunner {
             exitCode = try await withTaskCancellationHandler {
                 try await withCheckedThrowingContinuation { (c: CheckedContinuation<Int32, any Error>) in
                     p.terminationHandler = { c.resume(returning: $0.terminationStatus) }
-                    do { try p.run(); onStart?(p.processIdentifier) } catch { p.terminationHandler = nil; c.resume(throwing: error) }
+                    do {   // a Cancel that came before this point is kept by the box: the script then never starts
+                        if try box.start() { onStart?(p.processIdentifier) } else { p.terminationHandler = nil; c.resume(throwing: CancellationError()) }
+                    } catch { p.terminationHandler = nil; c.resume(throwing: error) }
                 }
             } onCancel: { box.terminate() }
         } catch {   // it never started: end the readers, which wait for the pipes' write ends
@@ -83,7 +85,8 @@ extension ScriptRunner {
         let code: Int32 = try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { (c: CheckedContinuation<Int32, any Error>) in
                 p.terminationHandler = { c.resume(returning: $0.terminationStatus) }
-                do { try p.run() } catch { p.terminationHandler = nil; try? out.fileHandleForWriting.close(); try? err.fileHandleForWriting.close(); c.resume(throwing: error) }
+                do { if try box.start() { return }; throw CancellationError() }
+                catch { p.terminationHandler = nil; try? out.fileHandleForWriting.close(); try? err.fileHandleForWriting.close(); c.resume(throwing: error) }
             }
         } onCancel: { box.terminate() }
         _ = try? await reader.value
@@ -91,11 +94,16 @@ extension ScriptRunner {
     }
 }
 
-/// A Process for the cancel handler, which runs on another thread: terminate() only (SIGTERM)
-private final class ProcessBox: @unchecked Sendable {
+/// A Process for a task's cancel handler, which runs on another thread: start() and terminate() (SIGTERM). A cancel that comes before the start is kept,
+/// and the process then never starts: a task cancelled just before its tool runs (a Cancel pressed while a build reads the git stamp, say) stops it all the same
+final class ProcessBox: @unchecked Sendable {
     private let p: Process
+    private let lock = NSLock()
+    private var cancelled = false
     init(_ p: Process) { self.p = p }
-    func terminate() { if p.isRunning { p.terminate() } }
+    /// Runs the process, unless a cancel came first: false then, and it never runs
+    func start() throws -> Bool { try lock.withLock { if cancelled { return false }; try p.run(); return true } }
+    func terminate() { lock.withLock { cancelled = true; if p.isRunning { p.terminate() } } }
 }
 
 final class LockedValue<T: Sendable>: @unchecked Sendable {

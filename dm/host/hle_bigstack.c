@@ -15,6 +15,9 @@
 #include <pthread.h>
 #include <stdarg.h>
 #include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <sys/mman.h>
 #define DM_LOG_IMPL   // dm_log is defined here, not by dm.h's weak definition
 #include "dm.h"
@@ -104,9 +107,39 @@ void *dm_bigstack_caller(void *ra) {
 
 // A log line (dm.h LOG). The variable arguments stay where the caller put them (on its stack, which stays mapped); only the formatting moves: log_emit is entered through
 // dm_bigstack_enter as a take-over is, with the argument list by address, so on a guest stack it runs on the host stack and anywhere else it is jumped to directly
+// Privacy: the home folder in a line becomes ~, so a shared log names neither the Mac's account (/Users/<name>) nor the iOS app's data container (its UUID). A match must be the
+// whole folder (followed by '/' or a character a folder name does not end in) and not the inside of a longer path; a "/private" in front of it goes too (iOS reports /var/mobile/... and
+// /private/var/mobile/... for the same folder). In place, the line only shortens; returns its new length
+size_t dm_log_tilde(char *s, size_t n, const char *home, size_t hn) {
+    while (hn > 1 && home[hn - 1] == '/') hn--;
+    if (!strncmp(home, "/private/", 9)) { home += 8; hn -= 8; }
+    if (hn < 2 || n < hn) return n;
+    size_t r = 0, w = 0;
+#define LT_NAME(c) (((c) >= 'a' && (c) <= 'z') || ((c) >= 'A' && (c) <= 'Z') || ((c) >= '0' && (c) <= '9') || (c) == '.' || (c) == '-' || (c) == '_')
+    while (r < n) {
+        if (s[r] == home[0] && r + hn <= n && !memcmp(s + r, home, hn) && (r + hn == n || !LT_NAME(s[r + hn]))) {
+            size_t b = w; if (b >= 8 && !memcmp(s + b - 8, "/private", 8)) b -= 8;
+            if (!b || !(LT_NAME(s[b - 1]) || s[b - 1] == '/')) { w = b; s[w++] = '~'; r += hn; continue; }
+        }
+        s[w++] = s[r++];
+    }
+#undef LT_NAME
+    return w;
+}
+static const char *g_log_home; static size_t g_log_home_n;
+static pthread_once_t g_log_home_once = PTHREAD_ONCE_INIT;
+static void log_home_init(void) { const char *h = getenv("HOME"); if (h && strlen(h) > 1) { g_log_home = strdup(h); g_log_home_n = strlen(h); } }
 static void log_emit(const char *fmt, va_list *ap) __attribute__((used));
 static void log_emit(const char *fmt, va_list *ap) {
-    flockfile(stderr); vfprintf(stderr, fmt, *ap); fputc('\n', stderr); funlockfile(stderr);
+    pthread_once(&g_log_home_once, log_home_init);
+    char buf[4096], *s = buf; va_list cp; va_copy(cp, *ap);
+    int n = vsnprintf(buf, sizeof buf, fmt, *ap);
+    if (n >= (int)sizeof buf && (s = malloc((size_t)n + 1))) vsnprintf(s, (size_t)n + 1, fmt, cp); else if (n >= (int)sizeof buf) { s = buf; n = (int)sizeof buf - 1; }
+    va_end(cp);
+    size_t len = n < 0 ? 0 : (size_t)n;
+    if (g_log_home) len = dm_log_tilde(s, len, g_log_home, g_log_home_n);
+    flockfile(stderr); fwrite(s, 1, len, stderr); fputc('\n', stderr); funlockfile(stderr);
+    if (s != buf) free(s);
 }
 void log_emit_bs(const char *fmt, va_list *ap);
 __asm__(".text\n.p2align 2\n.globl _log_emit_bs\n.private_extern _log_emit_bs\n_log_emit_bs:\n"

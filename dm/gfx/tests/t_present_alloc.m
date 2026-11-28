@@ -1,5 +1,6 @@
 // Display-link presents with the GPU held back: a present must not reset a command allocator whose own present has not run yet. Real Metal 4 queue and offscreen
-// drawables; the link's callback is called by hand (no window, no game files). Two cases: a dropped frame (two presents in flight) and one frame per tick (three in flight).
+// drawables; the link's callback is called by hand (no window, no game files). Two cases: a dropped frame (two presents in flight; in commit order, DM_PRESENT_ALLOC_ROTATE,
+// the tick after it takes a free allocator, then three in flight) and one frame per tick (three in flight).
 #include "../nvn/nvn_mtl.m"
 #include "t_mtl4.h"
 @interface FakeLinkUpdate : NSObject
@@ -53,7 +54,7 @@ static void reuse_case(id<CAMetalDrawable> dr, id<MTLSharedEvent> gate, uint64_t
     int returned = dispatch_semaphore_wait(g_held_done, dispatch_time(DISPATCH_TIME_NOW, 300 * NSEC_PER_MSEC)) == 0;
     pthread_mutex_lock(&g_pq_mu); int inside = g_pq_read == ticket && g_pq_inflight == inflight; pthread_mutex_unlock(&g_pq_mu);
     snprintf(name, sizeof name, "ticket %llu reached present_now", (unsigned long long)ticket); CHECK(name, returned || inside);
-    snprintf(name, sizeof name, "allocator %llu is not reused while ticket %llu is on the GPU", (unsigned long long)(ticket % 3), (unsigned long long)old); CHECK(name, !returned);
+    snprintf(name, sizeof name, "ticket %llu does not reuse ticket %llu's allocator while that is on the GPU", (unsigned long long)ticket, (unsigned long long)old); CHECK(name, !returned);
     gate.signaledValue = open;
     if (!returned) returned = dispatch_semaphore_wait(g_held_done, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)) == 0;
     snprintf(name, sizeof name, "ticket %llu is presented once the GPU gets to ticket %llu", (unsigned long long)ticket, (unsigned long long)old); CHECK(name, returned);
@@ -156,7 +157,10 @@ int main(void) { @autoreleasepool {
     // Every callback moves g_pq_done to ticket - 1, so it is no guard for the allocator: the presents below wait only if the allocator's own completion is checked.
     // On main both cases fail the reuse check, and the earlier ticket's drawable reads back black (0 in every pixel): its command buffer was encoded again before the GPU ran it
 
-    // A dropped frame: ticket 1 on allocator 1, then 3 (2 dropped) on allocator 0, then 4 on allocator 1 again with two presents in flight
+    // A dropped frame. By ticket (DM_PRESENT_ALLOC_ROTATE=0): ticket 1 on allocator 1, then 3 (2 dropped) on allocator 0, then 4 on allocator 1 again with two presents in flight.
+    // In commit order (the default): 1 on allocator 0, 3 on 1, and 4 on the free allocator 2 at once, the drop no matter (with ticket % 3 it waited for ticket 1, the negative
+    // control); then a fifth ticket on allocator 0 again with three in flight
+    int rotate = present_alloc_rotate_on(); printf("present allocator %s\n", rotate ? "in commit order (default)" : "by ticket (DM_PRESENT_ALLOC_ROTATE=0)");
     [g_q4 waitForEvent:gate value:1];   // nothing committed to the Metal 4 queue from here runs until the gate opens
     CHECK("no present has completed: the freeze detector's clock (dm_present_done_ns) is 0", atomic_load(&dm_present_done_ns) == 0);
     present_enqueue(&a, 1. / 60, NULL, NULL);
@@ -165,28 +169,38 @@ int main(void) { @autoreleasepool {
     tick();
     printf("after the drop: read %llu, done %llu, in flight %d\n", (unsigned long long)g_pq_read, (unsigned long long)g_pq_done, g_pq_inflight);
     CHECK("ticket 1 has not completed", g_pq_inflight == 2);
+    if (rotate) {   // the tick after the drop takes ticket 4 (waiting since the drop) on the third allocator: it does not wait for the GPU
+        g_held = drawable(); g_held_done = dispatch_semaphore_create(0); pthread_t th; pthread_create(&th, NULL, held_tick, NULL);
+        int returned = dispatch_semaphore_wait(g_held_done, dispatch_time(DISPATCH_TIME_NOW, 300 * NSEC_PER_MSEC)) == 0;
+        CHECK("after the drop, ticket 4 takes a free allocator: the callback does not wait for ticket 1", returned && g_pq_read == 4 && g_pq_inflight == 3);
+        if (!returned) { gate.signaledValue = 1; dispatch_semaphore_wait(g_held_done, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)); }
+        pthread_join(th, NULL);
+        present_enqueue(&c, 1. / 60, left_half, NULL);
+    }
+    uint64_t reuse_tk = rotate ? 5 : 4;
     // The held tick waits 300 ms for its allocator, past the 10 s mark shortened to 100 ms: it says so once, with its site and the allocator's tickets, and still waits for the GPU
     g_wait_say_ns = 100000000ull;
-    const char *err = stderr_of(^{ reuse_case(drawable(), gate, 1, 4, 2, 1); });
+    const char *err = stderr_of(^{ reuse_case(drawable(), gate, 1, reuse_tk, rotate ? 3 : 2, 1); });
     g_wait_say_ns = 10000000000ull;
     { static const char line[] = "[RED] the host has waited 0.1 s for the present allocator's previous present on the GPU at present_now (nvn_mtl.m:"; const char *w = strstr(err, line);
-      CHECK("the allocator wait past the mark says so once, with its site", w && !strstr(w + sizeof line - 1, "waited 0.1 s for the present allocator") && strstr(w, "allocator 1 last used by ticket 1, its feedback reported 0;")); }
+      CHECK("the allocator wait past the mark says so once, with its site", w && !strstr(w + sizeof line - 1, "waited 0.1 s for the present allocator") && strstr(w, rotate ? "allocator 0 last used by ticket 1, its feedback reported 0;" : "allocator 1 last used by ticket 1, its feedback reported 0;")); }
     { uint64_t t = atomic_load(&dm_present_done_ns); CHECK("a completed present sets the freeze detector's clock", t && t <= now_ns() && now_ns() - t < 5000000000ull); }
     int bad = bad_pixels(first.texture, 50, 150); printf("ticket 1 drawable: %d of 64 pixels wrong\n", bad);
     CHECK("ticket 1 shows its own picture", bad == 0);
 
-    // One frame per tick, nothing dropped: tickets 5, 6 and 7 on allocators 2, 0 and 1, then 8 on allocator 2 again with three presents in flight
+    // One frame per tick, nothing dropped: tickets b+1, b+2 and b+3 on the three allocators in turn (by ticket and in commit order alike), then b+4 on b+1's again with three presents in flight
+    uint64_t b0 = reuse_tk;
     [g_q4 waitForEvent:gate value:2];
     present_enqueue(&a, 1. / 60, NULL, NULL); id<CAMetalDrawable> fifth = tick();
     present_enqueue(&b, 1. / 60, NULL, NULL); tick();
     present_enqueue(&b, 1. / 60, NULL, NULL); tick();
     present_enqueue(&c, 1. / 60, left_half, NULL);
     printf("one per tick: read %llu, done %llu, in flight %d, dropped %llu\n", (unsigned long long)g_pq_read, (unsigned long long)g_pq_done, g_pq_inflight, (unsigned long long)g_link_dropped);
-    CHECK("tickets 5-7 have not completed", g_pq_inflight == 3 && g_link_dropped == 1);
-    reuse_case(drawable(), gate, 2, 8, 3, 5);
+    CHECK("the three tickets after it have not completed", g_pq_inflight == 3 && g_link_dropped == 1);
+    reuse_case(drawable(), gate, 2, b0 + 4, 3, b0 + 1);
     CHECK("no frame dropped after ticket 2", g_link_dropped == 1);
-    bad = bad_pixels(fifth.texture, 50, 150); printf("ticket 5 drawable: %d of 64 pixels wrong\n", bad);
-    CHECK("ticket 5 shows its own picture", bad == 0);
+    bad = bad_pixels(fifth.texture, 50, 150); printf("ticket %llu drawable: %d of 64 pixels wrong\n", (unsigned long long)(b0 + 1), bad);
+    CHECK("the first of them shows its own picture", bad == 0);
 
     // A standing frame trimmed (DM_PRESENT_TRIM=3): two frames waiting at every tick, as when two landed in one refresh and none came without one. FIFO takes the older at the
     // first two ticks, and the third takes the newest, dropping one; then a single frame resets the run. The GPU gate is open from here on

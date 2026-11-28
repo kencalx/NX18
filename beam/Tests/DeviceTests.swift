@@ -54,6 +54,34 @@ import Testing
         #expect(XcodeSigning.signingMessage("error: No profiles for 'x' were found in team ABCDE12345", teamID: "ABCDE12345").contains("(your team)"))
         #expect(!XcodeSigning.signingMessage("error: team ABCDE12345 failed", teamID: "ABCDE12345").contains("ABCDE12345"))
         #expect(XcodeSigning.signingMessage("You have reached the maximum App ID limit").contains("10"))
+        #expect(!XcodeSigning.signingMessage("error: No signing certificate \"Apple Development: Jane Example (ABCDE12345)\" found", teamID: "ABCDE12345").contains("Jane"))
+    }
+    /// xcodebuild.log without the player's signing details (Show Details opens it; players share it). Made-up team, name, certificate and address
+    @Test func xcodebuildLogRedacted() async throws {
+        let raw = """
+        Build settings from command line:
+            DEVELOPMENT_TEAM = ABCDE12345
+        Signing Identity:     "Apple Development: Jane Example (ABCDE12345)"
+        Provisioning Profile: "iOS Team Provisioning Profile: org.nxnative.ABCDE12345.0400486024dec000"
+        error: No Account for Team "Example Studio". Add a new account (jane.example@example.com) in Accounts settings
+        CopyPNGFile AppIcon60x60@2x.png
+        """
+        let r = XcodeSigning.redacted(raw, teamID: "ABCDE12345", teamName: "Example Studio")
+        for gone in ["ABCDE12345", "Jane", "Example Studio", "jane.example@example.com"] { #expect(!r.contains(gone), "\(gone) is not in the log") }
+        #expect(r.contains("DEVELOPMENT_TEAM = (your team)") && r.contains("\"Apple Development: (your certificate)\"") && r.contains("(your account)"))
+        #expect(r.contains("AppIcon60x60@2x.png") && r.contains("iOS Team Provisioning Profile: org.nxnative."), "the rest stays as it was")
+        let bare = XcodeSigning.redacted(raw)
+        #expect(!bare.contains("Jane Example") && bare.contains("DEVELOPMENT_TEAM = ABCDE12345"), "no team given: certificate names and addresses still go")
+
+        // Tool.run writes its log through the filter; XcodeSigning.sign gives it one
+        let d = FileManager.default.temporaryDirectory.appending(path: "beam-log-\(UUID().uuidString)"); defer { try? FileManager.default.removeItem(at: d) }
+        try FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
+        let log = d.appending(path: "xcodebuild.log")
+        let out = try await Tool.run("/bin/echo", ["DEVELOPMENT_TEAM = ABCDE12345"], log: log, logFilter: { XcodeSigning.redacted($0, teamID: "ABCDE12345") })
+        #expect(out.out.contains("ABCDE12345"), "the run's own output is unchanged (signingMessage reads it)")
+        #expect(try String(contentsOf: log, encoding: .utf8) == "DEVELOPMENT_TEAM = (your team)\n")
+        let src = try String(contentsOf: URL(fileURLWithPath: #filePath).deletingLastPathComponent().appending(path: "../Sources/Model/Signing.swift"), encoding: .utf8)
+        #expect(src.contains(#"log: logs.appending(path: "xcodebuild.log"), logFilter: { redacted($0, teamID: team.id, teamName: team.name) }"#), "sign() writes xcodebuild.log redacted")
     }
     @Test func xcodeArguments() {
         var r = BuildRequest(source: URL(fileURLWithPath: "/g/Z/z.nup"), target: .iPhone, keys: nil, package: nil, titleId: nil, workDir: URL(fileURLWithPath: "/space/X"))

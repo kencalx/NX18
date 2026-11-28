@@ -63,6 +63,7 @@ PR #2957, by seedds with Josh Haines, made from a legally owned and acquired cop
   and the app leaves out any row whose key its map lacks, as for every game. The K rows are one-draw
   passes the phone drew with no pass-as-compute kernel: the next shader build makes those kernels, as
   for Ocarina of Time's 2026-11-25 phone rows.
+- **Upstream's seed rows (2026-11-28 check):** [`pso_manifest.tsv`](pso_manifest.tsv) takes the 591 rows (0 `S`, 578 `R`, 13 `C`) upstream NXNative added to its list since the last check (`1a54371cf` to `7bc66e5a3`: `7071a5ef2`, `39fdbff96`; inbox captures and recordings from upstream's players, not recorded on NX 18's devices) that it lacked, below its rows; the list is now 7,834 rows. Upstream no longer records `S` rows (`28d41fc9d`, not taken here), so every new row is a pipeline. 21 more have the key of a row the list already holds and are not repeated. With no shader map registered, the rows were checked against the map this list's own `S` and `C` rows give (as `test_pso_seed_wonder_s2.py` checks the list): 98 rows name shaders no `S` row of the list names and are left out; the build's own check against its split decides the rest. Only rows new since the last check: rows NX 18 left out on purpose stay out. A first start with them on the iPhone (prepare time, footprint) is not measured.
 - Upstream's `validated.tsv` (a green run on upstream's chain) is not taken: it records a result
   of upstream's chain, not NX 18's.
 

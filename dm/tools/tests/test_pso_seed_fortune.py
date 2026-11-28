@@ -22,7 +22,8 @@ class Committed(unittest.TestCase):
         self.lines = [ln for ln in self.text.split('\n') if ln]
         self.note = next(i for i, ln in enumerate(self.lines) if ln.startswith('# Recorded on an iPhone 18 Pro Max'))
         self.grown = next(i for i, ln in enumerate(self.lines) if ln.startswith('# Grown on 2026-11-16'))   # the X2.0 sessions' rows
-        self.grown21 = next(i for i, ln in enumerate(self.lines) if ln.startswith('# Grown on 2026-11-21'))   # a short X2.0 session's rows, last
+        self.grown21 = next(i for i, ln in enumerate(self.lines) if ln.startswith('# Grown on 2026-11-21'))   # a short X2.0 session's rows
+        self.up = next(i for i, ln in enumerate(self.lines) if ln.startswith("# Added on 2026-11-28 from upstream NXNative's list at 7bc66e5a3"))   # upstream's rows since 1a54371cf, last
 
     def found(self, pattern, text):
         """re.search(pattern, text).groups(), or the test fails naming the pattern"""
@@ -34,17 +35,22 @@ class Committed(unittest.TestCase):
         rows = [ln for ln in self.lines if not ln.startswith('#')]   # as the host splits them: a '\r' would stay in the row
         keep, bad = pso_seed.collect(rows, self.shmap)
         self.assertEqual((bad, len(keep)), ([], len(rows)))
-        self.assertEqual(pso_seed.counts(keep), {'S': 3624, 'R': 2343, 'C': 84, 'M': 0, 'rows': 6051})
-        self.assertEqual(len({pso_seed.identity(r) for r in rows}), 6051)
+        self.assertEqual(pso_seed.counts(keep), {'S': 3624, 'R': 2397, 'C': 84, 'M': 0, 'rows': 6105})
+        self.assertEqual(len({pso_seed.identity(r) for r in rows}), 6105)
 
     def test_the_mac_rows_then_the_iphone_rows(self):
         mac = [ln for ln in self.lines[:self.note] if not ln.startswith('#')]
         phone = [ln for ln in self.lines[self.note:self.grown] if not ln.startswith('#')]
         grown = [ln for ln in self.lines[self.grown:self.grown21] if not ln.startswith('#')]
-        late = [ln for ln in self.lines[self.grown21:] if not ln.startswith('#')]
+        late = [ln for ln in self.lines[self.grown21:self.up] if not ln.startswith('#')]
+        up = [ln for ln in self.lines[self.up:] if not ln.startswith('#')]
+        self.assertEqual(pso_seed.counts(up), {'S': 0, 'R': 54, 'C': 0, 'M': 0, 'rows': 54})
+        self.assertEqual(self.found(r'(\d+) rows \((\d+) S, (\d+) R, (\d+) C\)', self.lines[self.up]), ('54', '0', '54', '0'))
+        self.assertFalse([r for r in up if '_bg' in r or '5f626776' in r], 'upstream\'s geometry reader rows (9ef8c65ef, not taken) are left out')
         self.assertEqual(pso_seed.counts(late), {'S': 3, 'R': 52, 'C': 0, 'M': 0, 'rows': 55})
         self.assertEqual(self.found(r'(\d+) rows \((\d+) S, (\d+) R, (\d+) C\)', self.lines[self.grown21]), ('55', '3', '52', '0'))
         self.assertFalse({pso_seed.identity(r) for r in self.lines if not r.startswith('#') and r not in late} & {pso_seed.identity(r) for r in late})
+        self.assertFalse({pso_seed.identity(r) for r in self.lines if not r.startswith('#') and r not in up} & {pso_seed.identity(r) for r in up})
         self.assertEqual(pso_seed.counts(mac), {'S': 1343, 'R': 442, 'C': 26, 'M': 0, 'rows': 1811})
         self.assertEqual(pso_seed.counts(phone), {'S': 220, 'R': 241, 'C': 13, 'M': 0, 'rows': 474})
         self.assertFalse({pso_seed.identity(r) for r in mac} & {pso_seed.identity(r) for r in phone})

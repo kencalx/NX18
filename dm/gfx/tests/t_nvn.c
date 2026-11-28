@@ -287,6 +287,11 @@ static void pool_access(void) {
     P(nvnBufferFinalize)(&buf); P(nvnMemoryPoolFinalize)(&virtual_pool); P(nvnMemoryPoolFinalize)(&physical); munmap(mem,size);
 }
 
+// cap_rec_fields walks with a spy (DM_NVN_NQ_BULK's plain op check): whether the walk named an object the queue snapshots
+static int g_spy_obj;
+static int spy_addr(void *ctx, uint64_t *f, uint64_t len, int w) { (void)ctx; (void)f; (void)len; (void)w; return 1; }
+static int spy_objf(void *ctx, int kind, uint64_t *f, uint8_t *payload, uint32_t size) { (void)ctx; (void)f; (void)payload; (void)size; if (kind == CAP_K_PROG || kind == CAP_K_TEX) g_spy_obj = 1; return 1; }
+static const cap_ops spy_ops = {spy_addr, spy_objf};
 int main(void) {
     // An empty DM_NVN_TSV (set but empty, as an `env NAME=` line or iOS's env.txt can leave it) must count as off: no
     // counting trampolines. nvn_counting caches its answer at the first call, so read it in a child forked before this
@@ -1383,6 +1388,93 @@ int main(void) {
         EXPECT("compact records expand to the canonical ones, in no more bytes", 0, bad);
         EXPECT("compact records are smaller in most cases", 1, smaller >= 35);
         P(nvnCommandBufferFinalize)(&ce); P(nvnMemoryPoolFinalize)(&mp);
+    }
+    // 5c. DM_NVN_NQ_BULK (upstream 6ccaca8e2): every op nq_flatten copies whole names no object the queue snapshots and passes cap_rec_fields on any payload (NX 18's own op list);
+    //     a list of plain, compact and special records flattens to the same nodes, bytes and signals either way. DM_NVN_REC_FAST: a recording through small segments (host-lent
+    //     ones past the first) comes out the same records and memory used either way
+    {
+        int plain_bad = 0, nplain = 0;
+        #define NQ_PLAIN_CHECK(mask, bad) do { (bad) = 0; for (uint32_t op = 0; op < OP_COUNT_; op++) { if ((mask) >> op & 1) continue; \
+            for (int pat = 0; pat < 2; pat++) { static uint8_t pl[1024]; memset(pl, pat ? 0x01 : 0, sizeof pl); g_spy_obj = 0; \
+                int ok = cap_rec_fields(op, pl, sizeof pl + 8, &spy_ops, NULL); if (!ok || g_spy_obj) { (bad)++; if ((mask) == NQ_SPECIAL) printf("op %u is not plain (cap_rec_fields %d, snapshots an object %d)\n", op, ok, g_spy_obj); } } } } while (0)
+        NQ_PLAIN_CHECK(NQ_SPECIAL, plain_bad);
+        for (uint32_t op = 0; op < OP_COUNT_; op++) nplain += nq_plain_op(op);
+        EXPECT("NQ_BULK: every plain op names no queue-snapshotted object and is never refused by cap_rec_fields", 0, plain_bad);
+        EXPECT("NQ_BULK: most ops are plain", 1, nplain >= 40 && !nq_plain_op(OP_COUNT_) && !nq_plain_op(OPC_BASE));
+        int ctl_bad; NQ_PLAIN_CHECK(NQ_SPECIAL & ~(1ull << OP_BIND_PROGRAM) & ~(1ull << OP_SET_RT), ctl_bad);
+        EXPECT("NQ_BULK negative control: a mask without BIND_PROGRAM and SET_RT fails the walk", 1, ctl_bad >= 2);
+        #undef NQ_PLAIN_CHECK
+        static uint32_t ev_w[1024] __attribute__((aligned(4096)));
+        NVNmemoryPoolBuilder eb; NVNmemoryPool ep; P(nvnMemoryPoolBuilderSetDefaults)(&eb); P(nvnMemoryPoolBuilderSetStorage)(&eb, ev_w, sizeof ev_w); P(nvnMemoryPoolInitialize)(&ep, &eb);
+        NVNeventBuilder evb; NVNevent ev[2]; P(nvnEventBuilderSetDefaults)(&evb); P(nvnEventBuilderSetStorage)(&evb, &ep, 0); P(nvnEventInitialize)(&ev[0], &evb); P(nvnEventBuilderSetStorage)(&evb, &ep, 64); P(nvnEventInitialize)(&ev[1], &evb);
+        static uint8_t m[1 << 16] __attribute__((aligned(4096))); NVNmemoryPoolBuilder mb; NVNmemoryPool mp; NVNcommandBuffer ce;
+        P(nvnMemoryPoolBuilderSetDefaults)(&mb); P(nvnMemoryPoolBuilderSetStorage)(&mb, m, sizeof m); P(nvnMemoryPoolInitialize)(&mp, &mb);
+        P(nvnCommandBufferInitialize)(&ce, &dev);
+        NVNcolorState cs; P(nvnColorStateSetDefaults)(&cs); P(nvnColorStateSetBlendEnable)(&cs, 1, 1);
+        float bc[4] = {0.25f, 0.5f, 0.75f, 1};
+        NVNbufferRange vb3[3] = {{0x40000, 0x100}, {0x41000, 0x200}, {0x42000, UINT64_C(0x100000001)}};   // one too large for a compact record: a canonical BIND_VBUF
+        // the recording: runs of plain records, compact records, ops 58 / 59 (depth bounds, line width), signals (some a second signal of a word, which cuts the node), a canonical vertex bind
+        #define NQ_LIST(cb) do { for (int i = 0; i < 40; i++) { \
+                P(nvnCommandBufferSetScissor)(cb, i, 0, 1280, 720); P(nvnCommandBufferSetDepthBounds)(cb, 1, 0.1f, 0.9f); P(nvnCommandBufferSetLineWidth)(cb, 2.0f + i); P(nvnCommandBufferSetBlendColor)(cb, bc); \
+                P(nvnCommandBufferBindUniformBuffer)(cb, NVN_SHADER_STAGE_FRAGMENT, i & 7, 0x30000 + 0x100 * (uint64_t)i, 0x100); P(nvnCommandBufferBindColorState)(cb, &cs); \
+                if (i % 9 == 4) P(nvnCommandBufferSignalEvent)(cb, &ev[i & 1], NVN_EVENT_SIGNAL_MODE_WRITE, NVN_EVENT_SIGNAL_LOCATION_BOTTOM, 0, (uint32_t)i); \
+                if (i % 13 == 6) P(nvnCommandBufferBindVertexBuffers)(cb, 0, 3, vb3); \
+                P(nvnCommandBufferDrawElementsBaseVertex)(cb, NVN_DRAW_PRIMITIVE_TRIANGLES, NVN_INDEX_TYPE_UNSIGNED_SHORT, 12 + i, 0x10000, 3); P(nvnCommandBufferSetDepthClamp)(cb, i & 1); \
+                P(nvnCommandBufferClearBuffer)(cb, 0x50000, 16, (uint32_t)i); } } while (0)
+        P(nvnCommandBufferAddCommandMemory)(&ce, &mp, 0, sizeof m); P(nvnCommandBufferBeginRecording)(&ce); NQ_LIST(&ce);
+        NVNcommandHandle hm = P(nvnCommandBufferEndRecording)(&ce);
+        nq_job jb[2]; int saved_bulk = nq_bulk; uint64_t runs0 = atomic_load(&nq_stat_bulk_runs);
+        for (int k = 0; k < 2; k++) { memset(&jb[k], 0, sizeof jb[k]); jb[k].objects.klen = 16; nq_bulk = !k; nq_flatten(&jb[k], (const uint8_t *)(uintptr_t)hm); nq_end(&jb[k]); }
+        nq_bulk = saved_bulk;
+        int same = 1, nodes = 0, sigs = 0;
+        for (nq_node *a = jb[0].first, *b = jb[1].first; a || b; a = a ? a->next : NULL, b = b ? b->next : NULL) {
+            if (!a || !b || a->kind != b->kind || a->length != b->length || a->nsignals != b->nsignals || a->closed != b->closed || (a->length && memcmp(a->bytes, b->bytes, a->length))) { same = 0; break; }
+            for (unsigned i = 0; i < a->nsignals; i++) same &= a->signals[i].word == b->signals[i].word && a->signals[i].value == b->signals[i].value && a->signals[i].mode == b->signals[i].mode;
+            nodes++; sigs += a->nsignals; }
+        EXPECT("NQ_BULK: the list flattens to the same nodes, bytes and signals as record by record", 1, same && nodes >= 2 && sigs >= 4);
+        EXPECT("NQ_BULK: runs were copied whole", 1, atomic_load(&nq_stat_bulk_runs) - runs0 >= 40);
+        // negative control: a CLEAR_TEX record copied whole keeps the game's texture object pointer, where nq_record_one puts the queue's snapshot
+        {   static tex_t tx; memset(&tx, 0, sizeof tx); tx.magic = MAGIC('T', 'E', 'X', 0); tx.serial = 0x7f000001;
+            uint32_t rsz = (uint32_t)((8 + sizeof(p_clear_tex) + 7) & ~7u); uint8_t *rp = calloc(1, rsz); op_hdr h0 = {OP_CLEAR_TEX, rsz}; memcpy(rp, &h0, 8); const tex_t *tp = &tx; memcpy(rp + 8, &tp, 8);
+            nq_job *jp = calloc(1, sizeof *jp); jp->objects.klen = 16; nq_record_one(jp, rp, h0); nq_end(jp);
+            nq_job jr = {0}; jr.objects.klen = 16; nq_node *rn = nq_open_commands(&jr); nq_bytes(rn, rp, h0.size); nq_end(&jr);
+            const tex_t *snap, *raw; memcpy(&snap, jp->first->bytes + 8, 8); memcpy(&raw, jr.first->bytes + 8, 8);
+            EXPECT("NQ_BULK negative control: a texture clear copied whole would name the game's object, not the snapshot", 1, raw == &tx && snap != raw && snap && snap->serial == tx.serial);
+            nq_node_free(jr.first); free(jr.objects.keys); free(jr.objects.vals); for (nq_node *n = jp->first, *nx; n; n = nx) { nx = n->next; nq_node_free(n); } nq_job_free(jp); free(rp); }
+        for (int k = 0; k < 2; k++) { for (nq_node *n = jb[k].first, *nx; n; n = nx) { nx = n->next; nq_node_free(n); } free(jb[k].objects.keys); free(jb[k].objects.vals); }
+        // DM_NVN_REC_FAST: the same list twice through 1 KB of the game's memory and host-lent segments past it, both ways
+        { size_t u[2], ln[2]; uint8_t *l[2]; int saved = g_rec_fast;
+          for (int k = 0; k < 2; k++) { g_rec_fast = !k; P(nvnCommandBufferAddCommandMemory)(&ce, &mp, 0, 1024); P(nvnCommandBufferBeginRecording)(&ce); NQ_LIST(&ce); NQ_LIST(&ce);
+              NVNcommandHandle hh = P(nvnCommandBufferEndRecording)(&ce); u[k] = P(nvnCommandBufferGetCommandMemoryUsed)(&ce); l[k] = nvn_rec_linear(hh, &ln[k]); }
+          g_rec_fast = saved;
+          EXPECT("REC_FAST: the same records and memory used with the fast cases as through the full paths", 1, ln[0] == ln[1] && !memcmp(l[0], l[1], ln[0]) && u[0] == u[1] && ln[0] > 8192);
+          free(l[0]); free(l[1]); }
+        // T_NQ_BENCH=1: flattening and recording one list of 50 rounds of the above, best of 9, both ways
+        if (getenv("T_NQ_BENCH")) {
+            static uint8_t big[4 << 20] __attribute__((aligned(4096))); NVNmemoryPoolBuilder bb; NVNmemoryPool bp; P(nvnMemoryPoolBuilderSetDefaults)(&bb); P(nvnMemoryPoolBuilderSetStorage)(&bb, big, sizeof big); P(nvnMemoryPoolInitialize)(&bp, &bb);
+            P(nvnCommandBufferAddCommandMemory)(&ce, &bp, 0, sizeof big); P(nvnCommandBufferBeginRecording)(&ce); for (int r = 0; r < 50; r++) NQ_LIST(&ce);
+            NVNcommandHandle hb = P(nvnCommandBufferEndRecording)(&ce); size_t nb; free(nvn_rec_linear(hb, &nb));
+            double best[2] = {1e9, 1e9}, rbest[2] = {1e9, 1e9}; int saved2 = nq_bulk, saved3 = g_rec_fast;
+            for (int it = 0; it < 9; it++) for (int k = 0; k < 2; k++) {
+                nq_bulk = !k; nq_job jj = {0}; jj.objects.klen = 16; struct timespec t0, t1; clock_gettime(CLOCK_MONOTONIC, &t0);
+                nq_flatten(&jj, (const uint8_t *)(uintptr_t)hb); nq_end(&jj); clock_gettime(CLOCK_MONOTONIC, &t1);
+                double us = (t1.tv_sec - t0.tv_sec) * 1e6 + (t1.tv_nsec - t0.tv_nsec) / 1e3; if (us < best[k]) best[k] = us;
+                for (nq_node *n = jj.first, *nx; n; n = nx) { nx = n->next; nq_node_free(n); } free(jj.objects.keys); free(jj.objects.vals);
+                g_rec_fast = !k; clock_gettime(CLOCK_MONOTONIC, &t0); P(nvnCommandBufferAddCommandMemory)(&ce, &bp, 0, sizeof big); P(nvnCommandBufferBeginRecording)(&ce); for (int r = 0; r < 50; r++) NQ_LIST(&ce); P(nvnCommandBufferEndRecording)(&ce); clock_gettime(CLOCK_MONOTONIC, &t1);
+                us = (t1.tv_sec - t0.tv_sec) * 1e6 + (t1.tv_nsec - t0.tv_nsec) / 1e3; if (us < rbest[k]) rbest[k] = us; }
+            double dbest[2] = {1e9, 1e9};   // draws, uniform binds and scissors alone, through entry points looked up once: the record paths without the lookups or the calls' own work
+            NVNT_nvnCommandBufferBindUniformBuffer f_ubo = P(nvnCommandBufferBindUniformBuffer); NVNT_nvnCommandBufferSetScissor f_sc = P(nvnCommandBufferSetScissor); NVNT_nvnCommandBufferDrawElementsBaseVertex f_dr = P(nvnCommandBufferDrawElementsBaseVertex);
+            for (int it = 0; it < 9; it++) for (int k = 0; k < 2; k++) { g_rec_fast = !k; struct timespec t0, t1; clock_gettime(CLOCK_MONOTONIC, &t0);
+                P(nvnCommandBufferAddCommandMemory)(&ce, &bp, 0, sizeof big); P(nvnCommandBufferBeginRecording)(&ce);
+                for (int i = 0; i < 20000; i++) { f_ubo(&ce, NVN_SHADER_STAGE_FRAGMENT, i & 7, 0x30000 + 0x100 * (uint64_t)(i & 63), 0x100); f_sc(&ce, i & 255, 0, 1280, 720); f_dr(&ce, NVN_DRAW_PRIMITIVE_TRIANGLES, NVN_INDEX_TYPE_UNSIGNED_SHORT, 12, 0x10000, 3); }
+                P(nvnCommandBufferEndRecording)(&ce); clock_gettime(CLOCK_MONOTONIC, &t1);
+                double us = (t1.tv_sec - t0.tv_sec) * 1e6 + (t1.tv_nsec - t0.tv_nsec) / 1e3; if (us < dbest[k]) dbest[k] = us; }
+            nq_bulk = saved2; g_rec_fast = saved3;
+            printf("t_nvn bench: %zu KB of records, flatten %.0f us record by record (DM_NVN_NQ_BULK=0) vs %.0f us in runs; recording them through name lookups %.0f us full paths (DM_NVN_REC_FAST=0) vs %.0f us; 60,000 uniform binds, scissors and draws %.0f vs %.0f us\n", nb >> 10, best[1], best[0], rbest[1], rbest[0], dbest[1], dbest[0]);
+            P(nvnMemoryPoolFinalize)(&bp);
+        }
+        #undef NQ_LIST
+        P(nvnCommandBufferFinalize)(&ce); P(nvnMemoryPoolFinalize)(&mp); P(nvnEventFinalize)(&ev[0]); P(nvnEventFinalize)(&ev[1]); P(nvnMemoryPoolFinalize)(&ep);
     }
     // 5b''. Host segment sizes (hostseg_size), as Super Mario Odyssey grants 512 bytes from an empty pool before recording: such a grant gets a HOSTSEG_SMALL segment; a recording
     //       that outgrows it with no callback goes on in a full one, as a second piece of its control list, and replays whole through its handle; a record larger than HOSTSEG_SZ gets a segment that holds it;

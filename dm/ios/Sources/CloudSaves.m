@@ -25,6 +25,13 @@ static void scope_slot(int slot, NSURL *url) {   // url: the folder this slot re
 }
 static void scope_hold(NSURL *url) { scope_slot(0, url); }
 
+// An error for the log as its domain and code (and the underlying one's): never its description, which names the file or folder, and the folder's name may carry the player's
+static NSString *why(NSError *e) {
+    if (!e) return @"no reason given";
+    NSError *u = e.userInfo[NSUnderlyingErrorKey];
+    return u ? [NSString stringWithFormat:@"%@ %ld, %@ %ld", e.domain, (long)e.code, u.domain, (long)u.code] : [NSString stringWithFormat:@"%@ %ld", e.domain, (long)e.code];
+}
+
 static NSData *fresh_bookmark(NSURL *url) {
     // The picker grants a security scope that lasts while it is held: the bookmark is written with
     // the scope on. One written without it reads back on this run and resolves to nothing from the
@@ -45,7 +52,7 @@ NSString *dm_cloud_saves_path(BOOL *stale) {
     if (!url) {
         // A re-signed build gets a bookmark the system will not resolve for it. Keep the data, the
         // player may install the same signature again, and let the launcher ask for a new pick.
-        fprintf(stderr, "boot: the picked cloud-save folder bookmark does not resolve (%s)\n", error.localizedDescription.UTF8String ?: "no reason given");
+        fprintf(stderr, "boot: the picked cloud-save folder bookmark does not resolve (%s)\n", why(error).UTF8String);
         scope_hold(nil);   // cloud saves are off now (no DM_SAVE_SYNC): a scope an earlier resolve started is stopped; a later resolve that works starts it again
         if (stale) *stale = YES;
         return nil;
@@ -67,12 +74,11 @@ BOOL dm_store_cloud_saves(NSURL *url) {
     if (bookmark) back = [NSURL URLByResolvingBookmarkData:bookmark options:0 relativeToURL:nil bookmarkDataIsStale:nil error:&error];
     if (!bookmark || !back) {
         // A bookmark that cannot come back is not saved as if it were good.
-        fprintf(stderr, "[RED] could not bookmark %s: %s\n", url.path.UTF8String ?: "?",
-                error.localizedDescription.UTF8String ?: (bookmark ? "the bookmark does not resolve again" : "no bookmark data"));
+        fprintf(stderr, "[RED] could not bookmark the cloud-save folder: %s\n", error ? why(error).UTF8String : bookmark ? "the bookmark does not resolve again" : "no bookmark data");
         return NO;
     }
     [NSUserDefaults.standardUserDefaults setObject:bookmark forKey:kCloudSaves];
-    fprintf(stderr, "launcher: cloud-save folder set to %s\n", url.path.UTF8String ?: "?");
+    fprintf(stderr, "launcher: cloud-save folder chosen\n");   // never its path: the folder's name may carry the player's name
     return YES;
 }
 
@@ -86,10 +92,11 @@ void dm_cloud_saves_env(void) {
     if (getenv("DM_SAVE_SYNC") && !fromPick) return;
     BOOL stale = NO;
     NSString *folder = nil;
+    BOOL viaNX18 = NO;
     if (dm_nx18_cloud_shared()) {   // this game's saves in the NX 18 folder: that folder's scope stays held, the own folder's goes
         folder = dm_nx18_folder_path(&stale);
         if (stale && !folder) fprintf(stderr, "boot: the NX 18 folder needs to be chosen again (the app is signed differently now); cloud saves use this game's own folder\n");
-        if (folder) scope_slot(0, nil);
+        if (folder) { scope_slot(0, nil); viaNX18 = YES; }
     }
     if (!folder) {
         folder = dm_cloud_saves_path(&stale);
@@ -98,7 +105,7 @@ void dm_cloud_saves_env(void) {
     }
     if (folder.length) {
         setenv("DM_SAVE_SYNC", folder.fileSystemRepresentation, 1); fromPick = YES;
-        fprintf(stderr, "boot: cloud saves through %s\n", folder.fileSystemRepresentation);
+        fprintf(stderr, "boot: cloud saves through %s\n", viaNX18 ? "the NX 18 folder" : "this game's own folder");   // the place, never its path (dm/mac/launcher.c cloud_saves_folder)
     } else if (fromPick) { unsetenv("DM_SAVE_SYNC"); fromPick = NO; }
 }
 
@@ -114,7 +121,7 @@ NSString *dm_nx18_folder_path(BOOL *stale) {
     BOOL isStale = NO; NSError *error = nil;
     NSURL *url = [NSURL URLByResolvingBookmarkData:bookmark options:0 relativeToURL:nil bookmarkDataIsStale:&isStale error:&error];
     if (!url) {   // a re-signed build: the data stays (the same signature may come back), and the card says "Choose your NX 18 folder again"
-        fprintf(stderr, "boot: the NX 18 folder bookmark does not resolve (%s)\n", error.localizedDescription.UTF8String ?: "no reason given");
+        fprintf(stderr, "boot: the NX 18 folder bookmark does not resolve (%s)\n", why(error).UTF8String);
         scope_slot(1, nil);
         if (stale) *stale = YES;
         return nil;

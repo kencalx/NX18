@@ -217,6 +217,14 @@ Guest threads, their synchronization and how the host schedules them. Each entry
 - **Check:** the host unit tests and `tsan-threads` (the thread tests use the wrappers too; with `DM_WAKE_UNLOCKED=0` as well). Breath of the Wild 1.9.0, M4 Max, three alternating A/B pairs ([PR #1466](https://github.com/seedds/nxnative/pull/1466)): lock-slow samples in the main thread 51–70 → 18, guest threads 503–512 → 494–498 ms/s, CPU energy 1.21 → 1.18 W, 59.8 fps on both. Octopath Traveler II (Unreal, route `battle`, M4 Pro, two runs each of main, this, and this with `DM_WAKE_UNLOCKED=0`): no change beyond run-to-run noise; process CPU 500–552 → 503–542 ms/s (300–440 s), CPU energy 1.45–1.50 → 1.46 W, 59.75 fps and frame p99 18.3 → 18.2 ms, screenshots alike.
 - **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md#found-on-this-game).
 
+### Guest sync calls walk the wait list once less
+
+- **Symptom:** none visible; time under the scheduler lock `G` in every unlock, condition signal and address signal, which grows with the number of blocked threads (tens in Unreal and other job-heavy games) and holds up every other thread's SVC.
+- **Cause:** all waiting threads are on one list (`g_wait`, `hle_thread.c`). `lock_handoff` (ArbitrateUnlock and the unlock inside a condition wait) picked the next owner and then walked the list again to see whether another waiter was left for the waiters bit; `SignalProcessWideKey` walked it again after its picks to see whether to clear the key, and its last pick walked the whole list to find nobody; `SignalToAddress` counted the address's waiters on every call, though only type 2 uses the count.
+- **Fix:** `pick_more` tells, from the walk the pick makes anyway, whether another waiter matches. `lock_handoff` takes the waiters bit from it; `SignalProcessWideKey` and `SignalToAddress` stop picking once none is left and `SignalProcessWideKey` takes "a waiter is left" from its last pick; `SignalToAddress` counts only for type 2, and type 2 with no waiter picks nothing. The waiters woken, their order (priority, then wait order), the waiters bit, the key and the address's value are the same. `DM_WAIT_TRIM=0` walks as before.
+- **Check:** `make -C dm/host/tests GAME=<id> run` runs `t_wait_trim`: 5,000 random wait lists of up to 48 waiters (lock, condition and address waits over four locks, keys and addresses, seven priorities), 16 random ArbitrateUnlock / SignalProcessWideKey / SignalToAddress calls each with every count and type, logged wake by wake with every waiter's state and every guest word after each call: the two modes match over about 46,000 wakes. Hand-written lists check the kernel order, the waiters bit and the key in both modes. `t_wait_trim_bad`, the negative control with a waiter count off by one, is caught at the first seed. `make -C dm/host/tests GAME=<id> wait-trim-bench` (M4 Max, best of 5, one waiter among 48 blocked threads, the test build at -O1): ArbitrateUnlock 63 → 39 ns, SignalProcessWideKey(1) 62 → 42 ns, SignalToAddress(0, 1) 71 → 41 ns a call, `G` taken and let go included.
+- **Phone check:** an on-battery A/B in a busy scene of an Unreal or job-heavy game (same route, same controller setup) with `DM_WAIT_TRIM=0` as the off side: CPU % and CPU W of the power line, frame time and dropped frames the same.
+
 ### `SignalToAddress` type 2 with count ≤ 0
 
 - **Symptom:** none seen; found while investigating [Fire Emblem Engage](../../dm/games/0100A6301214E000/README.md)'s demo crash, which it did not change (that was the address-space shortage, [Size-aligned regions exhaust the alias address space](memory.md#size-aligned-regions-exhaust-the-alias-address-space)).
@@ -290,6 +298,14 @@ Guest threads, their synchronization and how the host schedules them. Each entry
 ## Yields and spin waits
 
 The yield back-off (`DM_YIELD_BACKOFF`) and the rewriter's spin waits (`patch_nso.py` "Spin waits", `dm_spin_wait` in `hle_thread.c`), with their measurements, are in [development.md](../development.md#power) ("Yield loops", "Spin loops").
+
+### The host clock converts ticks without a divide
+
+- **Symptom:** none visible; a share of host CPU on a clock the host reads millions of times a second (every SVC's handoff timing, every sleep and wait, the guest's own tick reads), so it shows only as CPU % and CPU W.
+- **Cause:** `now_ns` and `now_cont_ns` (`hle_os.c`) computed `ticks * numer / denom` on every read, a 64-bit divide; on Apple silicon the timebase is 125 / 3.
+- **Fix:** a 128-bit multiply by `K = ceil(numer * 2^64 / denom)` gives the divide's result bit for bit wherever the old product did not wrap (`dm_tbconv.h` has the proof; for 125 / 3 the multiplier's error is 1 / 3 of a unit, and `t * numer < 2^64` keeps it below one). Past that range (194 years of uptime) and for a timebase whose error is too large it keeps the divide, so every result is the old one. The table is filled at load; `DM_NOW_MUL=0` (read again at host start, after the env files) takes the divide on every read, as before.
+- **Check:** `make -C dm/host/tests GAME=<id> run` runs `t_now_mul`: 186 million ticks against the divide (edge values, every tick of two windows, multiples of the denominator and their neighbours, random values of every magnitude, the full 64-bit range) for 125 / 3, 1 / 1 and 45 other timebases; a multiplier one unit low fails at the third tick, and a 32.32 fixed-point multiplier is caught differing. `make -C dm/host/tests now-mul-bench` (M4 Max, best of 5): the conversion 3.8-4.0 → 1.8-2.1 ns, `now_ns` with `mach_absolute_time` 7.6-7.7 → 5.0-5.6 ns.
+- **Phone check:** not separable on its own (about 0.2-0.6% of a core); it rides along with the other CPU trims in an on-battery A/B of CPU % and CPU W with `DM_NOW_MUL=0` as the off side.
 
 ### Timer slack in guest sleeps (`sleep_precise`)
 
@@ -423,6 +439,14 @@ The yield back-off (`DM_YIELD_BACKOFF`) and the rewriter's spin waits (`patch_ns
 - **Note:** on Horizon too this order comes from the time a request takes, not from a guarantee; the 200 µs is a model of that, so a starter stopped by the host for longer than that at this exact point would lose the race as before. Only file system calls are service requests here so far; another HLE that stands for a blocking request would call the same function when a game shows it needs that. Waking (not starting) a thread gets the release but no wait, so a reading thread woken for every request does not pay 200 µs each time.
 - **Check:** `make -C dm/host/tests GAME=<id> preempt` (`service_request_start`): with no request the starter is held to the worker's end and the flag stays set, as the game saw it; with one or two, in both scheduling modes, the worker sees the flag and clears it. On the game: a save, reopening the screen, loading and saving again, twelve overwrites in a row, a restart.
 - **Found on:** [Digimon Story Cyber Sleuth: Complete Edition](../../dm/games/010014E00DB56000/README.md#saves) ([issue #769](https://github.com/seedds/nxnative/issues/769)).
+
+### A file system call in no handoff skips the scheduler lock
+
+- **Symptom:** none visible; host CPU under the scheduler lock `G` during area loads and streaming, when a game makes thousands of file system calls a second while its other threads take `G` for every SVC.
+- **Cause:** each of the 25 file system hooks calls [`dm_thread_service_request`](#file-system-calls-are-service-requests) first, and it took `G` only to find that the caller belonged to no handoff (`nhand` 0), which is nearly always the case.
+- **Fix:** it reads the caller's own `nhand` without `G` (a relaxed atomic load, as `SleepThread` already did) and returns at once on 0. That is the answer `G` would give: while a thread runs, only it raises its own `nhand` (`note_runnable` sets it for a thread being woken or started, which is not running then; `hand_leave` clears its own), and others only lower it (`thr_free` drops a freed waker's entries, now stored atomically). A 0 stays 0 until the thread waits again, and a stale non-zero takes the old path, which looks again under `G`. `DM_FS_HAND_PEEK=0` takes `G` to look, as before.
+- **Check:** `make -C dm/host/tests GAME=<id> preempt` (`service_request_peek`; `tsan-threads` runs it under TSan): with `G` held 100 ms by another thread a request in no handoff returns in 0 µs, and with the peek off (the negative control) after 104 ms; a request in a handoff still leaves it; 20,000 requests while a peer drops the thread's handoff entries under `G` all end out of the handoff. A scratch bench including `hle_thread.c` (M4 Max, best of 5): 4.7 → 1.7 ns a call uncontended, 184 → 1.8 ns with two threads cycling `G`.
+- **Phone check:** an on-battery A/B of an area load or streaming stretch (same route, same controller setup) with `DM_FS_HAND_PEEK=0` as the off side: CPU % and CPU W of the power line, and the load's length.
 
 ### Queue polls with exclusive retries and no clrex
 

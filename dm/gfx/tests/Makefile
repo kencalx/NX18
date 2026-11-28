@@ -421,6 +421,18 @@ t_pso_user_queue: t_pso_user_queue.m $(MTL_T_DEP)
 .PHONY: check_t_pso_user_queue
 check_t_pso_user_queue: t_pso_user_queue
 	./t_pso_user_queue && ./t_pso_user_queue --off
+	DM_PSO_USER_HASH=0 ./t_pso_user_queue && DM_PSO_USER_HASH=0 ./t_pso_user_queue --off
+# The device's pipeline list filter as 64-bit row hashes (DM_PSO_USER_HASH) against the string filter's rules, on this GAME's seed list and the largest other list in the
+# tree; =0 checks the rules against the old code. `./t_pso_user_hash <seed> <other> bench` times both fills and their heap
+PSO_HASH_OTHER = ../../games/0100F2C0115B6000/pso_manifest.tsv
+t_pso_user_hash: t_pso_user_hash.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_pso_user_hash.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_pso_user_hash
+check_t_pso_user_hash: t_pso_user_hash
+	./t_pso_user_hash $(GAME_DIR)/pso_manifest.tsv $(PSO_HASH_OTHER)
+	DM_PSO_USER_HASH=0 ./t_pso_user_hash $(GAME_DIR)/pso_manifest.tsv $(PSO_HASH_OTHER)
+	DM_PSO_DROP_S=0 ./t_pso_user_hash $(GAME_DIR)/pso_manifest.tsv $(PSO_HASH_OTHER)
+	DM_PSO_DROP_S=0 DM_PSO_USER_HASH=0 ./t_pso_user_hash $(GAME_DIR)/pso_manifest.tsv $(PSO_HASH_OTHER)
 t_pool_notes: t_pool_notes.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_pool_notes.m ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(filter-out ../nvn/nvn_mtl.m,$(GFX)) $(FW)
 check_t_pool_notes: RUN_ENV = MTL_DEBUG_LAYER=1
@@ -440,7 +452,11 @@ pool-stats-tsan: t_pool_stats_tsan
 	TSAN_OPTIONS=halt_on_error=1:abort_on_error=0 ./t_pool_stats_tsan   # exit, not abort: the crash handler would report the abort
 t_htab_update: t_htab_update.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_htab_update.m $(MTL_T_SRC) $(FW)
-check_t_htab_update: RUN_ENV = MTL_DEBUG_LAYER=1
+.PHONY: check_t_htab_update
+check_t_htab_update: t_htab_update
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 ./t_htab_update
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 ./t_htab_update
+	MTL_DEBUG_LAYER=1 DM_NVN_HTAB_ARENA=0 ./t_htab_update
 t_sparse_tiles: t_sparse_tiles.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_sparse_tiles.m ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(filter-out ../nvn/nvn_mtl.m,$(GFX)) $(FW)
 # 64 MB placement heaps taking the lowest free tile (the default), and DM_NVN_SPARSE_HEAP_MB=256, today's heaps taking the tile freed last
@@ -498,6 +514,15 @@ check_t_present_alloc: t_present_alloc
 	MTL_DEBUG_LAYER=1 ./t_present_alloc
 	MTL_DEBUG_LAYER=1 DM_PRESENT_TRIM=0 ./t_present_alloc
 	MTL_DEBUG_LAYER=1 DM_PRESENT_FX_KEEP=1 ./t_present_alloc
+	MTL_DEBUG_LAYER=1 DM_PRESENT_ALLOC_ROTATE=0 ./t_present_alloc
+# The nvn-present thread asleep while the display link owns the layer (DM_PRESENT_WAKE): its wakes over 300 link presents, a 2,000-hand-back stress against lost wakeups, and
+# an unsignalled hand-back caught by its timer; =0 is the negative control (it wakes on every broadcast, as before)
+t_present_wake: t_present_wake.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_present_wake.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_present_wake
+check_t_present_wake: t_present_wake
+	MTL_DEBUG_LAYER=1 ./t_present_wake
+	MTL_DEBUG_LAYER=1 DM_PRESENT_WAKE=0 ./t_present_wake
 # A GPU whose access macOS revoked (DM_TEST_GPU_LOST, set by the test): the front end told once, the game's waits released, presents stopped
 # CPU_NO_ACCESS block-linear texture addresses and unasked virtual mappings stay out of the raw pool table (upstream NXNative 3dd1f7a65)
 t_gpu_only_addr: t_gpu_only_addr.m $(MTL_T_DEP)
@@ -532,6 +557,8 @@ check_t_present_snap: t_present_snap
 	DM_NVN_ENC_THREAD=0 MTL_DEBUG_LAYER=1 ./t_present_snap pacing
 	DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_present_snap resize
 	DM_NVN_ENC_THREAD=0 MTL_DEBUG_LAYER=1 ./t_present_snap resize
+	DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_present_snap alloc_fail
+	DM_NVN_ENC_THREAD=0 MTL_DEBUG_LAYER=1 ./t_present_snap alloc_fail
 	DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_present_snap crop
 	DM_NVN_ENC_THREAD=0 MTL_DEBUG_LAYER=1 ./t_present_snap crop
 	DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_present_snap crop_whole
@@ -623,6 +650,15 @@ check_t_geometry: RUN_ENV = MTL_DEBUG_LAYER=1
 t_feedback: t_feedback.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_feedback.m $(MTL_T_SRC) $(FW)
 # The replay's per-draw fast paths (DM_NVN_FB_STOR, DM_NVN_PSO_MEMO) against the paths they replace, with their benchmarks (reference/frame-rate.md)
+t_scan_cache: t_scan_cache.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_scan_cache.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_scan_cache
+check_t_scan_cache: t_scan_cache
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 ./t_scan_cache
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 ./t_scan_cache
+t_replay_trim: t_replay_trim.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_replay_trim.m $(MTL_T_SRC) $(FW)
+check_t_replay_trim: RUN_ENV = MTL_DEBUG_LAYER=1
 t_replay_fast: t_replay_fast.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_replay_fast.m $(MTL_T_SRC) $(FW)
 t_gpu_timing: t_gpu_timing.m $(MTL_T_DEP)
@@ -906,6 +942,7 @@ t_pso_later: t_pso_later.m $(MTL_T_DEP)
 .PHONY: check_t_pso_later
 check_t_pso_later: t_pso_later
 	MTL_DEBUG_LAYER=1 ./t_pso_later
+	DM_PSO_DROP_S=0 MTL_DEBUG_LAYER=1 ./t_pso_later
 # The GPU capture profile: a folder seeded by a run without Metal's capture layer, which a run with it (loaded by MTL_CAPTURE_ENABLED=1 or by METAL_CAPTURE_ENABLED=1), or
 # with DM_GPU_CAPTURE, must not open or write, and a run without it again opens (MTL_CAPTURE_ENABLED=0 loads no layer; DM_PSO_MTL4=0 is ignored). The runs with the layer go
 # without MTL_DEBUG_LAYER, which loads the validation layer in its place (no capture: archives work). The last run removes the folder (one a failed run leaves stays in /tmp)

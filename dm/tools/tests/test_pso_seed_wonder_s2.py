@@ -44,7 +44,7 @@ class Committed(unittest.TestCase):
         keep, bad = pso_seed.collect(self.rows, own_map(self.rows))
         self.assertEqual(bad, [])
         self.assertEqual(len(keep), len(self.rows))
-        self.assertEqual(pso_seed.counts(keep), {'S': 6990, 'R': 237, 'C': 1, 'M': 0, 'K': 15, 'rows': 7243})
+        self.assertEqual(pso_seed.counts(keep), {'S': 6990, 'R': 815, 'C': 14, 'M': 0, 'K': 15, 'rows': 7834})
 
     def test_a_stage_mismatch_is_refused(self):   # the list's own map still catches a row that names a shader at another stage
         k = next(r for r in self.rows if r.startswith('K\t'))
@@ -74,6 +74,16 @@ class Committed(unittest.TestCase):
         self.assertIn('53dd77a29', second[0])
         self.assertLess(self.lines.index(first[0]), self.lines.index(self.rows[0]))   # each note above the rows it names
         self.assertEqual(self.lines.index(second[0]), self.lines.index(self.rows[6302]) - 1)
+
+    def test_upstream_rows_since_the_last_check(self):   # upstream's R and C rows new since 1a54371cf whose shaders the list's S and C rows name, below the phone rows
+        up = [ln for ln in self.lines if ln.startswith("# Added on 2026-11-28 from upstream NXNative's list at 7bc66e5a3")]
+        self.assertEqual(len(up), 1)
+        self.assertEqual(self.lines.index(up[0]), self.lines.index(self.rows[7243]) - 1)
+        m = re.search(r'(\d+) rows \((\d+) S, (\d+) R, (\d+) C\), (\d+) M', up[0])
+        if m is None: self.fail(f'no count line in {up[0]!r}')
+        self.assertEqual(m.groups(), ('591', '0', '578', '13', '0'))
+        self.assertEqual(pso_seed.counts(self.rows[7243:]), {'S': 0, 'R': 578, 'C': 13, 'M': 0, 'rows': 591})
+        for word in ('7071a5ef2', '39fdbff96', '98 refused rows'): self.assertIn(word, up[0])
 
 
 if __name__ == '__main__':

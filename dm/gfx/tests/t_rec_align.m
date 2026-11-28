@@ -23,11 +23,13 @@ int main(int argc, char **argv) { @autoreleasepool {
 #endif
     // The hand-off: 20,000 records a frame (Ocarina of Time's replay records about that many), in a submission's mix of state setters and draws, then a drain
     enum { PER = 20000 };
-    double per[256], cyc[256]; if (frames > 256) frames = 256;
+    double per[256], cyc[256], tail[256], wk[256]; if (frames > 256) frames = 256;
     rec_put(RO_R_CULL, 0)->a[0] = 0; rec_drain();   // starts the encode thread
+    const char *pe = getenv("T_REC_PACE"); const uint64_t pace = pe ? (uint64_t)atoll(pe) : 0;   // T_REC_PACE=<ns>: the submit thread spends that long a record, as a replay does between its records, so the encode thread waits for blocks
     for (int f = 0; f < frames; f++) {
         uint64_t t0 = bp_now(), c0 = proc_cycles();
         for (int i = 0; i < PER; i++) {
+            if (pace) { uint64_t until = t0 + pace * (uint64_t)(i + 1); while (bp_now() < until) {} }
             switch (i & 7) {
             case 0: { MTLViewport v = {0, 0, 1280, 720, 0, 1}; rec_t *r = rec_put(RO_R_VIEWPORT, 0); memcpy(r->a, &v, sizeof v); break; }
             case 1: { MTLScissorRect s = {0, 0, 1280, 720}; rec_t *r = rec_put(RO_R_SCISSOR, 0); memcpy(r->a, &s, sizeof s); break; }
@@ -39,10 +41,12 @@ int main(int argc, char **argv) { @autoreleasepool {
             default: { rec_t *r = rec_put(RO_R_DRAW, 0); r->a[0] = 3; r->a[1] = 0; r->a[2] = 3; break; }
             }
         }
+        uint64_t t1 = bp_now(), w0 = atomic_load(&g_rb_wakes);   // the drain: what the encode thread still had to do once the last record was put (the tail after a commit)
         rec_drain();
-        per[f] = (double)(bp_now() - t0) / PER; cyc[f] = (double)(proc_cycles() - c0) / PER;
+        per[f] = (double)(bp_now() - t0) / PER; cyc[f] = (double)(proc_cycles() - c0) / PER; tail[f] = (double)(bp_now() - t1) / 1e3; wk[f] = (double)(atomic_load(&g_rb_wakes) - w0);
     }
-    qsort(per, (size_t)frames, sizeof *per, cmpd); qsort(cyc, (size_t)frames, sizeof *cyc, cmpd);
+    uint64_t wakes_all = atomic_load(&g_rb_wakes);
+    qsort(per, (size_t)frames, sizeof *per, cmpd); qsort(cyc, (size_t)frames, sizeof *cyc, cmpd); qsort(tail, (size_t)frames, sizeof *tail, cmpd); (void)wk;
     printf("t_rec_align (%s): %d frames of %d records, put to drained, ns per record: p50 %.2f / p10 %.2f / p90 %.2f; CPU cycles per record (both threads) p50 %.1f\n",
 #ifdef T_REC_BASE
            "base layout, r[] at offset 16",
@@ -50,6 +54,9 @@ int main(int argc, char **argv) { @autoreleasepool {
            "r[] on a 128-byte line",
 #endif
            frames, PER, per[frames / 2], per[frames / 10], per[frames * 9 / 10], cyc[frames / 2]);
+#ifndef T_REC_BASE
+    printf("t_rec_align: blocks of %d records (DM_NVN_REC_BLK): encode thread wakes %.1f per frame; the drain after the last record p50 %.1f us / p90 %.1f us\n", rec_blk_n(), (double)wakes_all / (frames + 1), tail[frames / 2], tail[frames * 9 / 10]);
+#endif
     printf("t_rec_align: %d checks, %d failed\n", checks, failed);
     return failed != 0;
 } }

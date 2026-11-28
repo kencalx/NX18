@@ -29,19 +29,15 @@ enum BeamKeychain {
     }
 
     /// The keychain file, made and unlocked; the user's keychain search list is left as it was
-    static func ready() async throws -> URL {
-        let pw = try password()
-        if !FileManager.default.fileExists(atPath: path.path) {
-            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-            let before = try await Tool.run("/usr/bin/security", ["list-keychains", "-d", "user"])
-            let r = try await Tool.run("/usr/bin/security", ["create-keychain", "-p", pw, path.path])
-            guard r.code == 0 else { throw DeviceError.signing("Could not make Beam's keychain: \(r.err)") }
-            let list = before.out.split(separator: "\n").map { $0.trimmingCharacters(in: CharacterSet(charactersIn: " \"")) }.filter { !$0.isEmpty }
-            if !list.isEmpty { _ = try? await Tool.run("/usr/bin/security", ["list-keychains", "-d", "user", "-s"] + list) }   // create-keychain added Beam's: put the list back
-            _ = try? await Tool.run("/usr/bin/security", ["set-keychain-settings", path.path])   // no lock after a timeout
+    static func ready() async throws -> URL { try ready(at: path, password: try password()) }
+    /// `kc` made the first time and unlocked, in Beam's process (KeychainFile): the password is never on a command line, where another process could read it
+    static func ready(at kc: URL, password pw: String) throws -> URL {
+        if !FileManager.default.fileExists(atPath: kc.path) {
+            try FileManager.default.createDirectory(at: kc.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try KeychainFile.create(kc, password: pw)
         }
-        _ = try await Tool.run("/usr/bin/security", ["unlock-keychain", "-p", pw, path.path])
-        return path
+        try KeychainFile.unlock(kc, password: pw)
+        return kc
     }
 
     /// Imports a .p12. With no -P, macOS asks for its password in a secure system dialog. The key is non-extractable and only codesign may use it without asking
@@ -49,7 +45,8 @@ enum BeamKeychain {
         let kc = try await ready()
         let r = try await Tool.run("/usr/bin/security", ["import", p12.path, "-k", kc.path, "-f", "pkcs12", "-x", "-T", "/usr/bin/codesign"])
         guard r.code == 0 else { throw DeviceError.signing(r.err.contains("passphrase") || r.err.contains("MAC verification") ? "The password for that certificate file was not right." : "The certificate could not be added: \(r.err.trimmingCharacters(in: .whitespacesAndNewlines))") }
-        _ = try await Tool.run("/usr/bin/security", ["set-key-partition-list", "-S", "apple-tool:,apple:,codesign:", "-s", "-k", try password(), kc.path])
+        do { try await KeychainFile.allowCodesign(kc, password: try password()) }   // as before, not an import failure: the certificate is in, codesign then asks once
+        catch { fputs("beam: \(error.localizedDescription)\n", stderr) }
     }
 
     /// The code-signing identities in Beam's keychain

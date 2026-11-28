@@ -25,6 +25,7 @@
 #include "hle.h"
 #include <malloc/malloc.h>
 #include <mach/mach.h>
+#include <pthread.h>
 #include <stdatomic.h>
 
 // Slot layouts: which slots the host fills and which do nothing (up to 6; 0 ends the list); the others keep the guest's own functions
@@ -49,6 +50,47 @@ static void used(int64_t d) {
     while (after > peak && !atomic_compare_exchange_weak(&g_peak, &peak, after)) {}
     if (after > peak && after >> 28 != peak >> 28) LOG("[mem] Unreal heap (host malloc zone) up to %.2f GB in use", after / 1073741824.0);
 }
+// Every FMemory allocation and free comes through here, from every Unreal thread, so its bookkeeping is per thread (DM_UE_HEAP_FAST, on by default; =0: as before, the shared
+// counters and ring and malloc_size on every call). FINAL FANTASY RESONANCE's CPU rose 66 -> 79% of a core across the builds that added the freed-block ring: each call did a
+// fetch_add, a load and a CAS on the two shared counters' cache line, malloc_size (a search of the registered zones) once or twice, and a fetch_add on the ring's shared index.
+// With the switch: the zone's own size call (the block is this zone's), the used bytes kept per thread and added to the shared counters each 1 MiB of change (the [mem] line's
+// 256 MB steps and the out-of-memory reports stay; a thread's pending change shows within 1 MiB), and the freed-block ring per thread (LATE_T blocks, with their sizes, so the
+// block pushed out needs no size call), which a thread's exit gives back (ue_tls_exit). The SMT V read of a block just freed is the freeing thread's own (release), which other
+// threads' frees no longer push out
+enum { LATE_T = 64, USED_BATCH = 1 << 20 };
+typedef struct { int64_t d; unsigned i; struct { void *p; size_t n; } late[LATE_T]; } ue_tls_t;
+static _Alignas(128) int g_fast;   // set by zone_ready before guest code runs
+static pthread_key_t g_ue_key;
+static size_t sz(const void *p) { return g_fast ? g_zone->size(g_zone, p) : malloc_size(p); }
+static void ue_tls_give_back(ue_tls_t *s) {   // the held blocks to the zone and the pending count to the shared one
+    for (int i = 0; i < LATE_T; i++) if (s->late[i].p) { s->d -= (int64_t)s->late[i].n; malloc_zone_free(g_zone, s->late[i].p); s->late[i].p = NULL; }
+    if (s->d) { used(s->d); s->d = 0; }
+}
+static void ue_tls_exit(void *p) { ue_tls_give_back(p); free(p); }
+static ue_tls_t *ue_tls(void) {
+    ue_tls_t *s = pthread_getspecific(g_ue_key);
+    if (__builtin_expect(!s, 0)) {
+        s = calloc(1, sizeof *s); if (!s) die("Unreal heap: no memory for a thread's state");
+#ifndef DM_TEST_UE_NO_EXIT_FLUSH
+        pthread_setspecific(g_ue_key, s);
+#else   // negative control for t_ue_heap_fast only: no exit hook (the state is still found through a thread-local pointer)
+        static __thread ue_tls_t *t_s; if (t_s) { free(s); return t_s; } t_s = s;
+#endif
+    }
+    return s;
+}
+static inline void used_fast(int64_t d) {
+    ue_tls_t *s = ue_tls(); s->d += d;
+    if (s->d >= USED_BATCH || s->d <= -USED_BATCH) { used(s->d); s->d = 0; }
+}
+static void count(int64_t d) { if (g_fast) used_fast(d); else used(d); }
+static int64_t used_now(void) { if (g_fast) { ue_tls_t *s = ue_tls(); if (s->d) { used(s->d); s->d = 0; } } return atomic_load(&g_used); }   // with this thread's pending change
+// The zone is made (fill) or a test set it: the switch, and the key of the per-thread state
+static void zone_ready(void) {
+    const char *e = getenv("DM_UE_HEAP_FAST");
+    g_fast = !e || atoi(e) != 0;
+    if (g_fast && pthread_key_create(&g_ue_key, ue_tls_exit)) g_fast = 0;
+}
 // Unreal's virtual allocator provides a 64 KiB-aligned base for span-sized blocks. Wwise masks an
 // interior pointer to that boundary to find its header, even though it requests only 4 KiB alignment.
 static size_t align_of(size_t n, uint32_t a) {
@@ -58,7 +100,7 @@ static size_t align_of(size_t n, uint32_t a) {
 static void *alloc(size_t n, uint32_t a) {
     size_t alignment = align_of(n, a);
     void *p = alignment == 16 ? malloc_zone_malloc(g_zone, n ? n : 1) : malloc_zone_memalign(g_zone, alignment, n ? n : 1);
-    if (p) used((int64_t)malloc_size(p));
+    if (p) count((int64_t)sz(p));
     return p;
 }
 // Freed small blocks keep their contents for a while (the last LATE_N frees of blocks up to LATE_MAX bytes go to the zone only when later frees push them out). Unreal's
@@ -71,9 +113,18 @@ static void *alloc(size_t n, uint32_t a) {
 enum { LATE_N = 256, LATE_MAX = 32768 };
 static void *_Atomic g_late[LATE_N];
 static _Atomic unsigned g_late_i;
-static void release(void *p) {
-    if (!p) return;
-    size_t n = malloc_size(p);
+static void release_n(void *p, size_t n) {   // n: p's size (sz)
+    if (g_fast) {
+        if (n <= LATE_MAX) {
+            ue_tls_t *s = ue_tls(); unsigned i = s->i++ % LATE_T;
+            void *q = s->late[i].p; size_t qn = s->late[i].n;
+            s->late[i].p = p; s->late[i].n = n;
+            if (!q) return;
+            p = q; n = qn;
+        }
+        used_fast(-(int64_t)n); malloc_zone_free(g_zone, p);
+        return;
+    }
     if (n <= LATE_MAX) {
         p = atomic_exchange(&g_late[atomic_fetch_add(&g_late_i, 1) % LATE_N], p);
         if (!p) return;
@@ -81,7 +132,9 @@ static void release(void *p) {
     }
     used(-(int64_t)n); malloc_zone_free(g_zone, p);
 }
-static void late_flush(void) {   // tests: give every held block to the zone
+static void release(void *p) { if (p) release_n(p, sz(p)); }
+static void late_flush(void) {   // tests: give every held block to the zone (with the switch, the calling thread's)
+    if (g_fast) { ue_tls_give_back(ue_tls()); return; }
     for (int i = 0; i < LATE_N; i++) { void *p = atomic_exchange(&g_late[i], NULL); if (p) { used(-(int64_t)malloc_size(p)); malloc_zone_free(g_zone, p); } }
 }
 static void *realloc_aligned(void *p, size_t n, uint32_t a) {
@@ -89,17 +142,19 @@ static void *realloc_aligned(void *p, size_t n, uint32_t a) {
     if (!n) { release(p); return NULL; }
     // A small block is moved by hand, so the old one is released as above and keeps its contents: a block that still holds the new size at its boundary stays where it is
     // (unless it would be more than half empty), as Binned3's realloc keeps a block whose bin holds the new size
-    size_t have = malloc_size(p);
+    size_t have = sz(p);
     if (have <= LATE_MAX) {
         size_t alignment = align_of(n, a);
         if (n <= have && n * 2 >= have && !((uintptr_t)p & (alignment - 1))) return p;
         void *r = alloc(n, a); if (!r) return NULL;
-        memcpy(r, p, have < n ? have : n); release(p); return r;
+        memcpy(r, p, have < n ? have : n);
+        if (g_fast) release_n(p, have); else release(p);
+        return r;
     }
     // The zone's realloc first: it grows in place and gives back what a shrink leaves, and an in-place block keeps its boundary. Only a block it leaves off the boundary is copied
-    size_t old = malloc_size(p), alignment = align_of(n, a);
+    size_t old = g_fast ? have : malloc_size(p), alignment = align_of(n, a);
     void *q = malloc_zone_realloc(g_zone, p, n); if (!q) return NULL;
-    used((int64_t)malloc_size(q) - (int64_t)old);
+    count((int64_t)sz(q) - (int64_t)old);
     if (!((uintptr_t)q & (alignment - 1))) return q;
     void *r = alloc(n, a);
     if (!r) {
@@ -123,11 +178,11 @@ static void *m_Realloc(void *self, void *p, size_t n, uint32_t a) {
 static void *m_TryRealloc(void *self, void *p, size_t n, uint32_t a) { (void)self; return realloc_aligned(p, n, a); }
 static void m_Free(void *self, void *p) { (void)self; release(p); }
 static size_t m_QuantizeSize(void *self, size_t n, uint32_t a) { (void)self; (void)a; return malloc_good_size(n); }
-static bool m_GetAllocationSize(void *self, void *p, size_t *out) { (void)self; if (!p) return false; *out = malloc_size(p); return true; }
+static bool m_GetAllocationSize(void *self, void *p, size_t *out) { (void)self; if (!p) return false; *out = sz(p); return true; }
 static void *m_Malloc32(void *self, uint32_t n, uint32_t a) { return m_Malloc(self, n, a); }
 static void *m_Realloc32(void *self, void *p, uint32_t n, uint32_t a) { return m_Realloc(self, p, n, a); }
 static uint32_t m_QuantizeSize32(void *self, uint32_t n, uint32_t a) { (void)self; (void)a; size_t q = malloc_good_size(n); return q > UINT32_MAX ? n : (uint32_t)q; }
-static bool m_GetAllocationSize32(void *self, void *p, uint32_t *out) { (void)self; if (!p) return false; *out = (uint32_t)malloc_size(p); return true; }
+static bool m_GetAllocationSize32(void *self, void *p, uint32_t *out) { (void)self; if (!p) return false; *out = (uint32_t)sz(p); return true; }
 static void m_Nothing(void *self) { (void)self; }   // Trim (its bool argument is ignored), the thread-local cache setup and teardown, DumpAllocatorStats
 // The host's vtable with the two words before its address point: Itanium's offset to top and RTTI, copied from the guest's, so code that reads the allocator's type (a dynamic_cast,
 // typeid) still finds FMallocBinned3's typeinfo; the guest's vtable may carry it (ue_malloc.py), and a bare array put zeros or other data there
@@ -169,7 +224,7 @@ static void fill(const uint8_t *vtable, int L, const char *what) {
     slots[k_lay[L].free_] = (void *)m_Free;
     slots[k_lay[L].quantize] = s32 ? (void *)m_QuantizeSize32 : (void *)m_QuantizeSize; slots[k_lay[L].get_size] = s32 ? (void *)m_GetAllocationSize32 : (void *)m_GetAllocationSize;
     for (int s = 0; s < 6 && k_lay[L].nothing[s]; s++) slots[k_lay[L].nothing[s]] = (void *)m_Nothing;
-    g_zone = malloc_create_zone(0, 0); malloc_set_zone_name(g_zone, "guest Unreal heap"); g_what = what;
+    g_zone = malloc_create_zone(0, 0); malloc_set_zone_name(g_zone, "guest Unreal heap"); g_what = what; zone_ready();
 }
 
 // Called once the modules are loaded and relocated, before any guest code runs

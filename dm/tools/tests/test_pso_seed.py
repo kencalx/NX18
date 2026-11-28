@@ -3,6 +3,7 @@ another stage, a key the prewarm drops, a pointer, bytes after a key, a path, a 
 before attr_hi against the same key whole), add's order, notes and counts, the provisional line it removes, rows the list names already, and nothing written on a refused row.
 And Persona 5 Royal's committed list, which must check clean."""
 import io
+import os
 import re
 import struct
 import sys
@@ -83,23 +84,23 @@ class Add(unittest.TestCase):
 
     def test_appends_in_order_with_notes_and_counts(self):
         r = f'R\t{skey()}'
-        new, bad = pso_seed.add(self.man, [self.rec(f'S\t{V}_b\t0', f'S\t{P}_b\t1', r, f'S\t{V}_b\t0', f'C\t{C}_b')], self.map, ['from a phone: {rows} rows, {S} S, {R} R, {C} C'])
+        new, bad = pso_seed.add(self.man, [self.rec(f'S\t{V}_b\t0', f'S\t{P}_b\t1', r, f'S\t{V}_b\t0', f'C\t{C}_b')], self.map, ['from a phone: {rows} rows, {S} S, {R} R, {C} C'], keep_s=True)
         self.assertEqual(bad, [])
         self.assertEqual(self.man.read_text(), f'# Prewarm seed list (shipped in the app).\n# from a phone: 4 rows, 2 S, 1 R, 1 C\nS\t{V}_b\t0\nS\t{P}_b\t1\n{r}\nC\t{C}_b\n')
         # a second list adds only what the manifest does not name, below the rows and notes already there
-        new, bad = pso_seed.add(self.man, [self.rec(f'S\t{P}_b\t1', f'R\t{skey(fs="", fs_stage=0)}')], self.map, ['# later: {R} R'])
+        new, bad = pso_seed.add(self.man, [self.rec(f'S\t{P}_b\t1', f'R\t{skey(fs="", fs_stage=0)}')], self.map, ['# later: {R} R'], keep_s=True)
         self.assertEqual(new, [f'R\t{skey(fs="", fs_stage=0)}'])
         self.assertTrue(self.man.read_text().endswith(f'C\t{C}_b\n# later: 1 R\nR\t{skey(fs="", fs_stage=0)}\n'))
         before = self.man.read_text()
-        self.assertEqual(pso_seed.add(self.man, [self.rec(f'S\t{P}_b\t1')], self.map, ['nothing new'])[0], [])
+        self.assertEqual(pso_seed.add(self.man, [self.rec(f'S\t{P}_b\t1')], self.map, ['nothing new'], keep_s=True)[0], [])
         self.assertEqual(self.man.read_text(), before)   # nothing new: the list is left as it is, no note
 
     def test_a_refused_row_writes_nothing_unless_dropped(self):
         before = self.man.read_text()
         src = self.rec(f'S\t{V}_b\t0', f'R\t{skey(ptr=1)}')
-        new, bad = pso_seed.add(self.man, [src], self.map)
+        new, bad = pso_seed.add(self.man, [src], self.map, keep_s=True)
         self.assertEqual((len(bad), self.man.read_text()), (1, before))
-        new, bad = pso_seed.add(self.man, [src], self.map, drop_invalid=True)
+        new, bad = pso_seed.add(self.man, [src], self.map, drop_invalid=True, keep_s=True)
         self.assertEqual(new, [f'S\t{V}_b\t0'])
         self.assertNotIn('Provisional', self.man.read_text())
 
@@ -107,7 +108,7 @@ class Add(unittest.TestCase):
         src = self.rec(f'S\t{V}_b\t0', f'C\t{C}_b')
         out, err = io.StringIO(), io.StringIO()
         with redirect_stdout(out), redirect_stderr(err):
-            self.assertEqual(pso_seed.main(['add', '--map', str(self.p / 'shader_map.tsv'), '--manifest', str(self.man), '--note', '{S} S', str(src)]), 0)
+            self.assertEqual(pso_seed.main(['add', '--map', str(self.p / 'shader_map.tsv'), '--manifest', str(self.man), '--note', '{S} S', '--keep-s', str(src)]), 0)
             self.assertEqual(pso_seed.main(['check', '--map', str(self.p / 'shader_map.tsv'), str(self.man)]), 0)
             self.assertEqual(pso_seed.main(['check', '--map', str(self.p / 'shader_map.tsv'), str(self.rec(f'S\t{P}_b\t0'))]), 1)
             crlf = self.p / 'crlf.tsv'; crlf.write_bytes(f'S\t{V}_b\t0\r\nC\t{C}_b\r\n'.encode())   # the host drops the C row; add takes the rows clean
@@ -115,6 +116,76 @@ class Add(unittest.TestCase):
         self.assertIn('2 rows added (S 1, R 0, C 1, M 0)', out.getvalue())
         self.assertIn('pixel shader in the shader map', err.getvalue())
         self.assertIn('carriage return', err.getvalue())
+
+
+class NoSRows(unittest.TestCase):
+    """DM_PSO_DROP_S (the host ignores S rows, nvn_mtl.m drop_s_on): add skips a recorded list's S rows by default, unchecked, and --keep-s or DM_PSO_DROP_S=0 adds them as
+    before; strip-s takes them out of a committed list only while the shader-build digest and the offline archive's rows stay the same"""
+    def setUp(self):
+        self.d = tempfile.TemporaryDirectory(); self.p = Path(self.d.name)
+        (self.p / 'shader_map.tsv').write_text(MAP); self.map = pso_seed.read_map(self.p / 'shader_map.tsv')
+        self.man = self.p / 'pso_manifest.tsv'; self.man.write_text('# Prewarm seed list (shipped in the app).\n')
+        self.env = os.environ.pop('DM_PSO_DROP_S', None)
+
+    def tearDown(self):
+        if self.env is not None: os.environ['DM_PSO_DROP_S'] = self.env
+        else: os.environ.pop('DM_PSO_DROP_S', None)
+        self.d.cleanup()
+
+    def rec(self, *rows):
+        p = self.p / 'rec.tsv'; p.write_text(''.join(r + '\n' for r in rows)); return p
+
+    def test_add_skips_s_rows_by_default(self):
+        src = self.rec(f'S\t{V}_b\t0', f'S\t{"f" * 16}_b\t1', f'C\t{C}_b')   # the second S row names no key of the map: skipped, not refused
+        skipped = []
+        new, bad = pso_seed.add(self.man, [src], self.map, ['{S} S, {C} C'], skipped=skipped)
+        self.assertEqual((new, bad, len(skipped)), ([f'C\t{C}_b'], [], 2))
+        self.assertEqual(self.man.read_text(), f'# Prewarm seed list (shipped in the app).\n# 0 S, 1 C\nC\t{C}_b\n')
+        # negative control: as before (--keep-s), the S rows are checked and the unknown key refuses the list
+        new, bad = pso_seed.add(self.man, [src], self.map, keep_s=True)
+        self.assertEqual(len(bad), 1)
+        self.assertNotIn('S\t', self.man.read_text())
+
+    def test_dm_pso_drop_s_0_keeps_them(self):
+        os.environ['DM_PSO_DROP_S'] = '0'
+        new, bad = pso_seed.add(self.man, [self.rec(f'S\t{V}_b\t0', f'C\t{C}_b')], self.map)
+        self.assertEqual((new, bad), ([f'S\t{V}_b\t0', f'C\t{C}_b'], []))
+
+    def test_the_command_line_says_what_it_skipped(self):
+        out = io.StringIO()
+        with redirect_stdout(out):
+            self.assertEqual(pso_seed.main(['add', '--map', str(self.p / 'shader_map.tsv'), '--manifest', str(self.man), str(self.rec(f'S\t{V}_b\t0', f'C\t{C}_b'))]), 0)
+        self.assertIn('1 S rows of the recorded lists skipped', out.getvalue())
+        self.assertIn('1 rows added (S 0, R 0, C 1, M 0)', out.getvalue())
+
+    def test_strip_s(self):
+        r, m = f'R\t{skey()}', f'M\t-\t{skey(vs=M + "_b", vs_stage=4)}'
+        text = f'# notes\nS\t{V}_b\t0\n{r}\nS\t{P}_b\t1\nC\t{C}_b\n\n# more\n{m}\nG\t{V}\t{G}\nK\t{V}\t{P}\n'
+        self.man.write_text(text)
+        self.assertEqual(pso_seed.strip_s(self.man), (2, None))
+        self.assertEqual(self.man.read_text(), f'# notes\n{r}\nC\t{C}_b\n\n# more\n{m}\nG\t{V}\t{G}\nK\t{V}\t{P}\n')
+        self.assertEqual(pso_seed.strip_s(self.man), (0, None))   # none left: the file as it is
+
+    def test_strip_s_keeps_a_real_profile_digest_and_refuses_a_change(self):
+        import shutil
+        sys.path.insert(0, str(REPO / 'dm/games')); sys.path.insert(0, str(REPO / 'dm/gfx/tools'))
+        import dmsh_chain, game
+        src = REPO / 'dm/games/0100BC0018138000'   # Super Mario RPG: 509 S rows beside R rows
+        prof = self.p / src.name; shutil.copytree(src, prof, ignore=shutil.ignore_patterns('*.md'))
+        before = dmsh_chain.inputs(game.load(str(prof)))
+        n, why = pso_seed.strip_s(prof / 'pso_manifest.tsv', game.load(str(prof)))
+        self.assertEqual((n, why), (509, None))
+        self.assertEqual(dmsh_chain.inputs(game.load(str(prof))), before)
+        # negative control: a digest that read the S rows refuses the cut and leaves the list as it was
+        shutil.copyfile(src / 'pso_manifest.tsv', prof / 'pso_manifest.tsv'); raw = (prof / 'pso_manifest.tsv').read_bytes()
+        real = dmsh_chain.inputs
+        try:
+            dmsh_chain.inputs = lambda g: real(g) + str(len(g.table('pso_manifest.tsv').read_bytes()))
+            n, why = pso_seed.strip_s(prof / 'pso_manifest.tsv', game.load(str(prof)))
+        finally:
+            dmsh_chain.inputs = real
+        self.assertIn('shader-build digest would change', why or '')
+        self.assertEqual((prof / 'pso_manifest.tsv').read_bytes(), raw)
 
 
 class Committed(unittest.TestCase):
@@ -166,15 +237,17 @@ class Committed(unittest.TestCase):
                    [('# Grown on 2026-11-15 from an iPhone 18 Pro Max play session (about 4 min, build 431d5d18', (444, 246, 198, 0))])
 
     def test_donkey_kong_bananza_grown_from_the_phone(self):   # its README, Files
-        rows = self.grown('040074A01BF12000', {'S': 8159, 'R': 7049, 'C': 46, 'M': 0, 'G': 1, 'rows': 15255},
+        rows = self.grown('040074A01BF12000', {'S': 8159, 'R': 8718, 'C': 50, 'M': 0, 'G': 1, 'rows': 16928},
                           [('# Grown on 2026-11-15 from an iPhone 18 Pro Max\'s Documents/pso_user.tsv after three play sessions', (4657, 4412, 245, 0)),
                            ('# Added on 2026-11-15 from an earlier iPhone 18 Pro Max Documents/pso_user.tsv (X1.0, build 6448f757', (8, 0, 8, 0)),
                            ('# Grown on 2026-11-17 from the same iPhone 18 Pro Max\'s Documents/pso_user.tsv after runs on chain ae1dd68dc11c', (283, 1, 282, 0)),
                            ('# Grown on 2026-11-19 from the same iPhone 18 Pro Max\'s Documents/pso_user.tsv after the X2.0 runs of 2026-11-17 to 19 on chain ae1dd68dc11c', (5566, 1677, 3880, 9)),
                            ('# Added on 2026-11-27 from upstream NXNative c48caaea6, ce02afbf2, b1ef1be1c', (234, 16, 218, 0)),   # 3.2.0 inbox rows
-                           ('# Added on 2026-11-27 from upstream NXNative\'s list at 1a54371cf', (30, 0, 30, 0))])   # upstream's rows since the last check; 8bd55038c (1.0) still left out
-        self.assertEqual(pso_seed.counts(rows[-30 - 234:-30]), {'S': 16, 'R': 218, 'C': 0, 'M': 0, 'rows': 234})
-        self.assertEqual(pso_seed.counts(rows[-30:]), {'S': 0, 'R': 30, 'C': 0, 'M': 0, 'rows': 30})
+                           ('# Added on 2026-11-27 from upstream NXNative\'s list at 1a54371cf', (30, 0, 30, 0)),   # upstream's rows since the last check; 8bd55038c (1.0) still left out
+                           ('# Added on 2026-11-28 from upstream NXNative\'s list at 7bc66e5a3', (1673, 0, 1669, 4))])   # only rows new upstream since 1a54371cf, no S rows (28d41fc9d); its G rows wait for a shader rebuild
+        self.assertEqual(pso_seed.counts(rows[-1673 - 30 - 234:-1673 - 30]), {'S': 16, 'R': 218, 'C': 0, 'M': 0, 'rows': 234})
+        self.assertEqual(pso_seed.counts(rows[-1673 - 30:-1673]), {'S': 0, 'R': 30, 'C': 0, 'M': 0, 'rows': 30})
+        self.assertEqual(pso_seed.counts(rows[-1673:]), {'S': 0, 'R': 1669, 'C': 4, 'M': 0, 'rows': 1673})
         self.assertFalse([r for r in rows if '_bg' in r or '_bl' in r or '5f626776' in r], 'the geometry path\'s rows are left out')
 
     def test_super_mario_bros_wonder_recorded_on_the_phone(self):   # its README, Pipelines on a first start
@@ -185,10 +258,11 @@ class Committed(unittest.TestCase):
                     ('# Added on 2026-11-27 from upstream NXNative\'s list at 1a54371cf', (604, 285, 316, 3))])
 
     def test_star_fox_grown_from_the_phone(self):   # its README, Pipelines on a first start
-        self.grown('0400E88025B1A000', {'S': 700, 'R': 608, 'C': 15, 'M': 0, 'rows': 1323},
+        self.grown('0400E88025B1A000', {'S': 700, 'R': 738, 'C': 15, 'M': 0, 'rows': 1453},
                    [('# Grown on 2026-11-15 from an iPhone 18 Pro Max play session (about 6 min, build 431d5d18', (83, 39, 44, 0)),
                     ('# Grown on 2026-11-16 from a second iPhone 18 Pro Max session (about 6 min, build 29dcbb4d', (6, 4, 2, 0)),
-                    ('# Grown on 2026-11-19 from the same iPhone 18 Pro Max\'s Documents/pso_user.tsv after the X2.0 runs of 2026-11-17 to 19 on chain ae1dd68dc11c', (133, 61, 72, 0))])
+                    ('# Grown on 2026-11-19 from the same iPhone 18 Pro Max\'s Documents/pso_user.tsv after the X2.0 runs of 2026-11-17 to 19 on chain ae1dd68dc11c', (133, 61, 72, 0)),
+                    ('# Added on 2026-11-28 from upstream NXNative\'s list at 7bc66e5a3', (130, 0, 130, 0))])   # only rows new upstream since 1a54371cf
 
     def test_13_sentinels_grown_from_the_phone(self):   # its README, Rendering (Prewarm list)
         self.grown('01003FC01670C000', {'S': 751, 'R': 147, 'C': 0, 'M': 0, 'rows': 898},

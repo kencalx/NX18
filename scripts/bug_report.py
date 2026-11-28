@@ -4,7 +4,7 @@
     python3 scripts/bug_report.py <title ID | path to the .app | NSP folder> [--ios-log FILE] [--out FILE]
 
 The zip holds report.md (one section per field of the bug form, filled in where the script can know it) and the text files below.
-ALLOWED is the whole list of what can go in; nothing else is read. Every text file is redacted (home folder -> ~, lines that look like key material dropped) and cut to a size cap.
+ALLOWED is the whole list of what can go in; nothing else is read. Every text file is redacted (home folder -> ~, lines that look like key material dropped; in crash reports the machine, session and incident IDs) and cut to a size cap.
 Exit code: 0 done, 1 the file could not be written, 2 the target was not understood."""
 import argparse
 import datetime
@@ -41,6 +41,16 @@ KEY_LINE = re.compile(rf'(?i)key\w*[\s=:"\'\[\],]*{HEX}{{32,}}')
 KEY_LINE2 = re.compile(rf'(?i)(?:title|master|prod|common|aes|kek|rights)[\w ]*[=:]\s*"?{HEX}{{32,}}\b')   # "titlekek_source = <hex>" and the like
 SECRET_NAME = re.compile(r'(?i)(key|secret|token|password)')
 BUILT_BY = re.compile(r'(build: built by ).*?(, build ID )')
+# Crash reports (.ips, .crash): the IDs that link one machine's or one session's reports together, their values replaced by "(removed)". crashReporterKey is a stable per-machine
+# ID; the rest are per incident, session, boot or device. The binary images' UUIDs stay (they name builds, which symbolication needs)
+CRASH_IDS = ('crashReporterKey', 'sessionID', 'bootSessionUUID', 'incident', 'incident_id', 'deviceIdentifierForVendor', 'sleepWakeUUID', 'beta_identifier', 'anonymousUUID')
+CRASH_JSON_ID = re.compile(r'("(?:' + '|'.join(CRASH_IDS) + r')"\s*:\s*")[^"]*(")')
+CRASH_TEXT_ID = re.compile(r'(?mi)^([ \t]*(?:CrashReporter Key|Incident Identifier|Anonymous UUID|Sleep/Wake UUID|Beta Identifier|Session ID)[ \t]*:[ \t]*)\S.*$')
+
+
+def scrub_crash_ids(text):
+    """a crash report's text with its machine, session and incident IDs written as (removed): the JSON keys of .ips files and the header lines of .crash files"""
+    return CRASH_TEXT_ID.sub(r'\1(removed)', CRASH_JSON_ID.sub(r'\1(removed)\2', text))
 
 
 def redact(text, home):
@@ -167,8 +177,9 @@ class Bundle:
         self.home, self.total_cap, self.file_cap = home, total_cap, file_cap
         self.files, self.notes, self.used = {}, [], 0
 
-    def add(self, arc, text, what):
-        """add a text file: redacted, cut to the file cap, and refused when the total cap would be passed"""
+    def add(self, arc, text, what, crash=False):
+        """add a text file: redacted (crash: its IDs scrubbed first, scrub_crash_ids), cut to the file cap, and refused when the total cap would be passed"""
+        if crash: text = scrub_crash_ids(text)
         text, dropped = redact(text, self.home)
         text, was_cut = cut(text, self.file_cap)
         n = len(text.encode('utf-8', 'replace'))
@@ -178,10 +189,10 @@ class Bundle:
         extra = ([f'{dropped} key-like line(s) removed'] if dropped else []) + (['cut to the first and last part'] if was_cut else [])
         self.notes.append(f'{what}: included ({n // 1024} KiB){"; " + "; ".join(extra) if extra else ""}')
 
-    def add_file(self, arc, path, what):
+    def add_file(self, arc, path, what, crash=False):
         t = read_text(path) if Path(path).exists() else None
         if t is None: self.notes.append(f'{what}: not found or not a text file ({self.short(path)})')
-        else: self.add(arc, t, what)
+        else: self.add(arc, t, what, crash)
 
     def short(self, p): return redact(str(p), self.home)[0]
 
@@ -231,7 +242,7 @@ def collect(target, ios_log=None, home=None, total_cap=TOTAL_CAP, file_cap=FILE_
     exe = [plist.get('CFBundleExecutable') or '', 'dmhost']
     cr = crash_reports(home, [e for e in exe if e])
     if not cr: b.notes.append('Crash reports: none of dmhost or the app in the last 7 days')
-    for p in cr: b.add_file(f'crash/{p.name}', p, f'crash report {p.name}')
+    for p in cr: b.add_file(f'crash/{p.name}', p, f'crash report {p.name}', crash=True)
 
     # settings
     prefs = read_prefs(bundle_id)

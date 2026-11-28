@@ -311,7 +311,7 @@ enum GameMenuExit {
     let dir = fm.temporaryDirectory.appendingPathComponent("share-log", isDirectory: true)
     try? fm.removeItem(at: dir)
     do { try fm.createDirectory(at: dir, withIntermediateDirectories: true) } catch {
-        fputs("[RED] share log: \(dir.path) cannot be made: \(error.localizedDescription)\n", stderr); return
+        fputs("[RED] share log: its folder (\(dir.lastPathComponent) in the app's temporary folder) cannot be made: \(error.localizedDescription)\n", stderr); return
     }
     let sources: [URL] = [doc.appendingPathComponent("log.txt"), doc.appendingPathComponent("log.prev.txt")]
     var files: [URL] = []

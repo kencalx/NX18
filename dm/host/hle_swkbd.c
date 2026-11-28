@@ -59,6 +59,15 @@ int g_swkbd_name_panel;
 int g_swkbd_min_chars = -1;     // ≥0 = this input needs at least that many characters (ShowKeyboardArg's minimum length; the applet keeps OK disabled until the text is long enough, so the front end's box keeps itself up until then)
 int g_swkbd_numeric_max = -1;   // ≥0 = this input is a quantity box, value = upper limit (set by dm_textinput.c, read by the front end input box, set back to -1 after use)
 int (*g_swkbd_unfilter)(void);   // registered by the host (dm_charname_unfilter in hle_charname.c; NULL in unit tests): keyboard requests from the naming panel bypass the game's ASCII typing filter
+// Privacy: what the player typed (often their own name) and the game's initial text go into the log as their length, "(N characters)"; the diagnostic switch DM_SWKBD_LOG_TEXT=1
+// logs the text itself in quotes, as before. Returns s itself (in quotes: *q set to "'") or its length written into b
+// (read at each keyboard: a keyboard is rare, and env.txt may set it after the start)
+const char *swkbd_log_text(const char *s, char *b, size_t n, const char **q) {
+    const char *e = getenv("DM_SWKBD_LOG_TEXT");
+    if (e && *e == '1') { *q = "'"; return s; }
+    size_t c = 0; for (const unsigned char *p = (const unsigned char *)s; *p; p++) c += (*p & 0xC0) != 0x80;   // UTF-8 code points
+    *q = ""; snprintf(b, n, "(%zu character%s)", c, c == 1 ? "" : "s"); return b;
+}
 typedef int (*swkbd_input_fn)(const char *title, const char *sub, const char *guide, const char *initial, int max_chars, char *out, int out_cap);
 Result swkbd_show(void *out, const void *arg_, swkbd_input_fn input) {
     const uint8_t *arg = arg_;
@@ -81,8 +90,9 @@ Result swkbd_show(void *out, const void *arg_, swkbd_input_fn input) {
     int r = script ? (snprintf(text, sizeof text, "%s", script), 1) : (g_swkbd_min_chars = minlen > 0 ? minlen : -1, input(title, sub, guide, init, maxlen > 0 ? maxlen : 0, text, sizeof text));
     g_swkbd_numeric_max = -1;   // the numeric box mark applies to this one time only (set by dm_textinput.c before bringing up the keyboard)
     g_swkbd_min_chars = -1;     // the minimum length applies to this one time only
-    LOG("swkbd: title '%s' initial '%s' limit %d min %d → %s%s%s", title, init, maxlen, minlen,
-        r > 0 ? "OK '" : r == 0 ? "cancel" : "no window, treated as cancel", r > 0 ? text : "", r > 0 ? "'" : "");
+    { char ib[48], tb[48]; const char *iq, *is = swkbd_log_text(init, ib, sizeof ib, &iq), *tq = "", *ts = r > 0 ? swkbd_log_text(text, tb, sizeof tb, &tq) : "";
+      LOG("swkbd: title '%s' initial %s%s%s limit %d min %d → %s%s%s%s", title, iq, is, iq, maxlen, minlen,
+          r > 0 ? "OK " : r == 0 ? "cancel" : "no window, treated as cancel", tq, ts, tq); }
     if (r <= 0) return SWKBD_RESULT_CANCELED;
     if (g_swkbd_name_panel && g_swkbd_unfilter && g_swkbd_unfilter()) LOG("swkbd: naming panel -- turned off the game's ASCII input filter on the returned string (Chinese names allowed, see hle_charname.c)");
 
@@ -175,7 +185,8 @@ HLE_FORCE("_ZN2nn5swkbd14InlineKeyboard4CalcEv", "inline keyboard per-frame upda
         if (script) { snprintf(text, sizeof text, "%s", script); r = 1; }
         else { guest_clock_freeze_for(2, 1); r = front_text_input("", "", "", "", max, text, sizeof text); guest_clock_freeze_for(2, 0); }
     }
-    LOG("swkbd: inline keyboard %p → %s%s%s", kb, r > 0 ? "OK '" : enter ? "cancel" : "no enter callback, cancel", r > 0 ? text : "", r > 0 ? "'" : "");
+    { char tb[48]; const char *tq = "", *ts = r > 0 ? swkbd_log_text(text, tb, sizeof tb, &tq) : "";
+      LOG("swkbd: inline keyboard %p → %s%s%s%s", kb, r > 0 ? "OK " : enter ? "cancel" : "no enter callback, cancel", tq, ts, tq); }
     pthread_mutex_lock(&g_ikb_mu); if (g_ikb[i].kb == kb) g_ikb[i].state = 1; pthread_mutex_unlock(&g_ikb_mu);   // the keyboard closes once the text is decided or cancelled
     if (r <= 0) { if (fn) fn(); return 1; }
     static ikb_str_arg a; memset(&a, 0, sizeof a);   // one keyboard request at a time; static keeps 1 KB off the guest stack

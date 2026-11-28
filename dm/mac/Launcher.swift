@@ -51,7 +51,7 @@ enum SaveCheck {
         // the folder as launcher.c will pass it (cloud_saves_folder): DM_SAVE_SYNC from the launch environment or an env file, else the NX 18 folder or this game's own; "0" = off
         let folder = getenv("DM_SAVE_SYNC").map { String(cString: $0) } ?? (MacCloud.place().folder ?? "")
         let line = (folder.isEmpty ? "0" : folder).withCString { f in SaveSyncReport.run { save_sync_report(save, id, f, SaveSyncReport.waitMs, $0, $1) } }
-        guard let line else { fputs("launcher: save sync: no report on \(String(cString: save))\n", stderr); return nil }
+        guard let line else { fputs("launcher: save sync: no report on \((String(cString: save) as NSString).abbreviatingWithTildeInPath)\n", stderr); return nil }   // ~, never the account's home folder
         fputs("launcher: save sync: \(line)\n", stderr)
         let r = SaveSyncReport(line: line)
         if r?.pullPending == true { fputs("launcher: save sync: \(SaveSyncReport.pullPendingNote)\n", stderr) }
@@ -854,7 +854,7 @@ struct LauncherView: View {
         let lang = m.values["DM_LANG"] ?? info("DMLanguage") ?? "en-US"
         guard let page = extras.guidePage(language: lang) else { return }
         MacGuideWindow.show(index: page.index, root: page.root, fontDir: Bundle.main.resourceURL?.appendingPathComponent("dm/font"), title: name)
-        fputs("launcher: game guide \(page.index.path)\n", stderr)
+        fputs("launcher: game guide \(page.index.path.replacingOccurrences(of: page.root.path, with: "<guide>"))\n", stderr)   // inside the guide, never the app's full path
     }
 
     // Where the host keeps the save (launcher.c: DM_SAVE, else Application Support/nxnative/<title ID>/save), for Last played
@@ -1062,7 +1062,7 @@ final class MacGuideBox: NSView {
         w.center()
         n.window = w; current = n
         w.makeKeyAndOrderFront(nil)
-        fputs("launcher: acknowledgements \(url.path)\n", stderr)
+        fputs("launcher: acknowledgements \(url.lastPathComponent)\n", stderr)   // the file, never the app's full path
     }
 
     func close() { window?.delegate = nil; window?.close(); window = nil; if Self.current === self { Self.current = nil } }

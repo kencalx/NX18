@@ -387,6 +387,66 @@ int main(void) { @autoreleasepool {
             pthread_mutex_lock(&g_shotq_mu);g_pshot.pending=0;pthread_mutex_unlock(&g_shotq_mu);
             [NSFileManager.defaultManager removeItemAtPath:dir error:nil];
         }
+        {   // DM_PRESENT_FX_DIRECT: a crop that is its whole texture is scaled from the texture itself, with the same bytes out as through the copy into fx->in. Sources: the sRGB
+            // picture above (shared), a private copy of it, an RGBA16Float one, and a texture whose size is not a multiple of 8; the live present and a capture; a crop that is
+            // not the whole texture goes through the copy (counted apart)
+            g_fx_mode=1;int keep=fx_direct_on();
+            MTLTextureDescriptor *pd=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:big.pixelFormat width:N height:N mipmapped:NO];pd.storageMode=MTLStorageModePrivate;pd.usage=MTLTextureUsageShaderRead;
+            id<MTLTexture> priv=[g_dev newTextureWithDescriptor:pd];res_add(priv);res_commit();
+            { T4 *cb=t4_begin();id<MTL4ComputeCommandEncoder> bl=t4_copy(cb);t4_use(cb,big);t4_use(cb,priv);
+              [bl copyFromTexture:big sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(N,N,1) toTexture:priv destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0,0,0)];
+              t4_end(cb,bl);t4_wait(cb); }
+            id<MTLTexture> half=step_tex(N,N,N/3,30,220,255,NULL,1),odd=step_tex(50,38,17,10,240,255,NULL,0);res_add(half);res_add(odd);res_commit();
+            id<MTLTexture> shared=[g_dev newTextureWithDescriptor:bd];{uint8_t *q=malloc(N*N*4);[big getBytes:q bytesPerRow:N*4 fromRegion:MTLRegionMake2D(0,0,N,N) mipmapLevel:0];
+                [shared replaceRegion:MTLRegionMake2D(0,0,N,N) mipmapLevel:0 withBytes:q bytesPerRow:N*4];free(q);}res_add(shared);res_commit();   // big's picture in a texture no earlier case marked
+            id<MTLTexture> srcs[4]={priv,shared,half,odd};
+            mtl_present_upscale_set("metalfx");for(int w_=0;w_<4;w_++){g_present_n+=FX_REMAKE_PRESENTS;check_present_live(priv,NULL,192,96,NULL);}   // the live present's pick taken, its scaler made (the cases before leave it unsettled)
+            const char *names[4]={"sRGB private","sRGB shared","RGBA16Float","50x38"};
+            const int sz[2][2]={{192,96},{256,128}};
+            uint8_t *pa_=malloc(256*128*4),*pb_=malloc(256*128*4);
+            for(int i=0;i<4;i++)for(int k=0;k<2;k++){
+                int w=sz[k][0],h=sz[k][1];char nm[160];
+                atomic_store(&g_fx_direct,0);g_present_n+=FX_REMAKE_PRESENTS;int ka=check_present_live(srcs[i],NULL,w,h,pa_);uint64_t n0=atomic_load(&g_fx_direct_n);
+                atomic_store(&g_fx_direct,1);g_present_n+=FX_REMAKE_PRESENTS;int kb=check_present_live(srcs[i],NULL,w,h,pb_);uint64_t n1=atomic_load(&g_fx_direct_n);
+                snprintf(nm,sizeof nm,"MetalFX in place: %s at %dx%d, both through MetalFX",names[i],w,h);EXPECT(nm,PRESENT_METALFX*16+PRESENT_METALFX,ka*16+kb);
+                snprintf(nm,sizeof nm,"MetalFX in place: %s at %dx%d, read in place once (counted), the same bytes as through the copy",names[i],w,h);
+                EXPECT(nm,1,n1==n0+1&&!memcmp(pa_,pb_,(size_t)w*h*4));
+            }
+            {   // a capture (its own scaler, not counted) the same way; a crop that is not the whole texture copies (not counted)
+                uint8_t *c=malloc(192*96*4),*e=malloc(192*96*4);
+                atomic_store(&g_fx_direct,0);present_rgba(big,NULL,192,96,c);atomic_store(&g_fx_direct,1);uint64_t n0=atomic_load(&g_fx_direct_n);present_rgba(big,NULL,192,96,e);
+                EXPECT("MetalFX in place: a capture gives the same bytes, not counted as the live present's",1,!memcmp(c,e,192*96*4)&&atomic_load(&g_fx_direct_n)==n0);
+                const int part[4]={8,8,48,48};g_present_n+=FX_REMAKE_PRESENTS;check_present_live(big,part,192,96,NULL);
+                EXPECT("MetalFX in place: a crop inside the texture goes through the copy",1,atomic_load(&g_fx_direct_n)==n0&&g_fx_present.in!=nil);
+                free(c);free(e);
+            }
+            {   // fx_direct_plain: a source the copy reads differently from the texture itself keeps the copy, with the same bytes as =0: a swizzled texture (the copy takes
+                // the stored bytes, a read applies the swizzle), a 2D array of one slice and a texture with mips (the copy takes slice 0, level 0)
+                const int W=64,H=64;uint8_t *px=malloc(W*H*4);for(int y=0;y<H;y++)for(int x=0;x<W;x++){uint8_t *q=px+4*(y*W+x);q[0]=x<W/3?230:20;q[1]=40+y;q[2]=x<W/2?10:180;q[3]=255;}
+                MTLTextureDescriptor *sd=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:W height:H mipmapped:NO];sd.storageMode=MTLStorageModeShared;sd.usage=MTLTextureUsageShaderRead;
+                sd.swizzle=MTLTextureSwizzleChannelsMake(MTLTextureSwizzleBlue,MTLTextureSwizzleGreen,MTLTextureSwizzleRed,MTLTextureSwizzleAlpha);
+                id<MTLTexture> swz=[g_dev newTextureWithDescriptor:sd];
+                MTLTextureDescriptor *ad=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:W height:H mipmapped:NO];ad.storageMode=MTLStorageModeShared;ad.usage=MTLTextureUsageShaderRead;
+                ad.textureType=MTLTextureType2DArray;ad.arrayLength=1;id<MTLTexture> arr=[g_dev newTextureWithDescriptor:ad];
+                MTLTextureDescriptor *md=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:W height:H mipmapped:YES];md.storageMode=MTLStorageModeShared;md.usage=MTLTextureUsageShaderRead;
+                id<MTLTexture> mip=[g_dev newTextureWithDescriptor:md];
+                [swz replaceRegion:MTLRegionMake2D(0,0,W,H) mipmapLevel:0 withBytes:px bytesPerRow:W*4];
+                [arr replaceRegion:MTLRegionMake2D(0,0,W,H) mipmapLevel:0 slice:0 withBytes:px bytesPerRow:W*4 bytesPerImage:W*H*4];
+                [mip replaceRegion:MTLRegionMake2D(0,0,W,H) mipmapLevel:0 withBytes:px bytesPerRow:W*4];
+                { uint8_t *z=calloc(W*H*4,1);for(NSUInteger l=1;l<mip.mipmapLevelCount;l++){NSUInteger lw=MAX(W>>l,1),lh=MAX(H>>l,1);[mip replaceRegion:MTLRegionMake2D(0,0,lw,lh) mipmapLevel:l withBytes:z bytesPerRow:lw*4];}free(z); }
+                res_add(swz);res_add(arr);res_add(mip);res_commit();free(px);
+                id<MTLTexture> odd_srcs[3]={swz,arr,mip};const char *odd_names[3]={"a swizzled texture","a 2D array of one slice","a texture with mips"};
+                uint8_t *oa=malloc(192*96*4),*ob=malloc(192*96*4);
+                for(int i=0;i<3;i++){char nm[160];
+                    atomic_store(&g_fx_direct,0);g_present_n+=FX_REMAKE_PRESENTS;int ka=check_present_live(odd_srcs[i],NULL,192,96,oa);uint64_t n0=atomic_load(&g_fx_direct_n);
+                    atomic_store(&g_fx_direct,1);g_present_n+=FX_REMAKE_PRESENTS;int kb=check_present_live(odd_srcs[i],NULL,192,96,ob);uint64_t n1=atomic_load(&g_fx_direct_n);
+                    snprintf(nm,sizeof nm,"MetalFX in place: %s goes through the copy (not counted), the same bytes as =0",odd_names[i]);
+                    EXPECT(nm,1,ka==PRESENT_METALFX&&kb==PRESENT_METALFX&&n1==n0&&!memcmp(oa,ob,192*96*4));
+                }
+                free(oa);free(ob);res_remove(swz);res_remove(arr);res_remove(mip);
+            }
+            free(pa_);free(pb_);res_remove(shared);res_remove(priv);res_remove(half);res_remove(odd);atomic_store(&g_fx_direct,keep);
+        }
         res_remove(big);g_fx_mode=0;
     } else printf("no Metal 4 MetalFX spatial scaler on this GPU: the MetalFX present is not checked\n");
     int invalid[4][4]={{-1,0,4,4},{0,-1,4,4},{0,0,0,4},{7,0,4,4}};

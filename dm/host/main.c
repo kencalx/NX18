@@ -100,6 +100,7 @@ static unsigned g_race_n, g_race_want;
 static void *keyrace_thread(void *unused);
 extern uint64_t g_host_start_ns;   // hle_lifecycle.c: the start's timeline counts from here when no Play time is given (DM_PLAY_AT)
 static void host_preload(int argc, char **argv) {
+    dm_now_ns_config();   // DM_NOW_MUL from the env files (hle_os.c), read at load before they were set
     g_host_start_ns = now_ns();
     g_t0_ns = proc_start_mono_ns();
     flags_init();

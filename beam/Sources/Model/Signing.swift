@@ -95,22 +95,35 @@ enum XcodeSigning {
             + (profileSeed.map { ["DM_PROFILE_SEED=\($0.path)"] } ?? []) + ["build"]
     }
 
-    /// Builds and signs the prepared project for one device; returns the signed app. The log goes to `<build folder>/logs/xcodebuild.log`
+    /// Builds and signs the prepared project for one device; returns the signed app. The log goes to `<build folder>/logs/xcodebuild.log`, without the team's ID
+    /// and name, the certificate's name or an account's address (redacted): Show Details opens it and players share it in bug reports
     static func sign(work: URL, titleID: String, device: DeviceInfo, team: XcodeTeam, profileSeed: URL? = nil) async throws -> URL {
         let project = work.appending(path: "xcode/DmIOS.xcodeproj"), derived = work.appending(path: "xcode-derived-data")
         let logs = work.appending(path: "logs"); try? FileManager.default.createDirectory(at: logs, withIntermediateDirectories: true)
         let scheme = try await scheme(project: project, titleID: titleID)
         let r = try await Tool.run("/usr/bin/xcrun", buildArguments(project: project, scheme: scheme, device: device.udid ?? device.id, team: team, derived: derived, profileSeed: profileSeed),
-                                   log: logs.appending(path: "xcodebuild.log"))
-        if r.code != 0 { throw DeviceError.signing(signingMessage(r.out + r.err, teamID: team.id)) }
+                                   log: logs.appending(path: "xcodebuild.log"), logFilter: { redacted($0, teamID: team.id, teamName: team.name) })
+        if r.code != 0 { throw DeviceError.signing(signingMessage(r.out + r.err, teamID: team.id, teamName: team.name)) }
         let products = derived.appending(path: "Build/Products/Release-iphoneos")
         guard let app = (try? FileManager.default.contentsOfDirectory(at: products, includingPropertiesForKeys: nil))?.first(where: { $0.pathExtension == "app" }) else { throw DeviceError.noApp }
         return app
     }
 
-    /// xcodebuild's reason in a sentence where Beam knows it (the team ID never in it)
-    static func signingMessage(_ raw: String, teamID: String = "") -> String {
-        let log = teamID.isEmpty ? raw : raw.replacingOccurrences(of: teamID, with: "(your team)")
+    /// A text with the player's signing details taken out: the team ID (xcodebuild echoes DEVELOPMENT_TEAM, and it is in certificate and profile names), the team's
+    /// name (often the player's own), certificate names ("Apple Development: <name> (<team>)") and e-mail addresses (an Apple account in Xcode's messages)
+    static func redacted(_ raw: String, teamID: String = "", teamName: String = "") -> String {
+        var t = raw
+        if !teamID.isEmpty { t = t.replacingOccurrences(of: teamID, with: "(your team)") }
+        if teamName.count >= 4 { t = t.replacingOccurrences(of: teamName, with: "(your team name)") }
+        t = t.replacingOccurrences(of: #"\b(Apple Development|Apple Distribution|iPhone Developer|iPhone Distribution|iOS Development|iOS Distribution|Mac Developer|Developer ID Application)\s*:[^"'\n]*"#,
+                                   with: "$1: (your certificate)", options: .regularExpression)
+        // an address, not an image's scale suffix (AppIcon60x60@2x.png)
+        return t.replacingOccurrences(of: #"[A-Za-z0-9._%+-]+@(?![0-9]+x[.~])[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}"#, with: "(your account)", options: .regularExpression)
+    }
+
+    /// xcodebuild's reason in a sentence where Beam knows it (the team ID, the team's name and the certificate's never in it: redacted)
+    static func signingMessage(_ raw: String, teamID: String = "", teamName: String = "") -> String {
+        let log = redacted(raw, teamID: teamID, teamName: teamName)
         let l = log.lowercased()
         if l.contains("maximum number of apps") || l.contains("app id limit") || l.contains("maximum app id") {
             return "This Apple account reached its limit of new App IDs for the week (a free account has 10). Reinstall a game you already have, or wait a few days."

@@ -2,11 +2,10 @@
 // shown in place of its name), the "About this game"
 // text (dm/about.json), the player's manual (dm/manual.pdf) and the game's own guide (the offline HTML pages beside the RomFS, the folder hle_web.c serves: DM_HTML, else html beside
 // DM_ROMFS, else the bundle's html). The art, the text and the manual are app-wide (<App>/dm), but the folder the launcher's list came from (DM_APP_DM, a program's dm/p<N>) is
-// looked in first. The art's average colour, for the screen's tint, is worked out on the CPU (NX18Palette.average, Core Graphics): never a Metal device or a Core Image context
-// here, which would come before the game's first device (Launcher.swift metalDeviceMade)
+// looked in first. The art's average colour, for the screen's tint, and the wash's blur are worked out on the CPU (NX18Palette.average, NX18Blur, Core Graphics): never a Metal
+// device or a Core Image context here, which would come before the game's first device (Launcher.swift metalDeviceMade)
 import Foundation
 import UIKit
-import CoreImage
 
 // about.json: the game's eShop page text, from a public title database (scripts/game_art.py). Every field may be missing or of another type; such a field is nil
 struct LauncherAbout: Decodable, Equatable, Sendable {
@@ -207,7 +206,7 @@ struct LauncherArtwork {
         return w
     }
 
-    // The art's colours as a tiny blurred field (48 × 27): averaged down by the draw, blurred once by Core Image, so drawn scaled up it is a soft multi-colour gradient with
+    // The art's colours as a tiny blurred field (48 × 27): averaged down by the draw, blurred once on the CPU (NX18Blur), so drawn scaled up it is a soft multi-colour gradient with
     // no detail and no live blur (nothing redraws per frame). Without art or icon: NX 18's teal into coral, as the art side's fallback
     static func wash(_ image: UIImage?) -> UIImage? {
         let w = 48, h = 27
@@ -223,10 +222,8 @@ struct LauncherArtwork {
                 ctx.drawLinearGradient(g, start: CGPoint(x: 0, y: h), end: CGPoint(x: w, y: 0), options: [.drawsBeforeStartLocation, .drawsAfterEndLocation])
             }
         }
-        guard let small = ctx.makeImage() else { return nil }
-        let ci = CIImage(cgImage: small).clampedToExtent().applyingGaussianBlur(sigma: 3).cropped(to: CGRect(x: 0, y: 0, width: w, height: h))
-        guard let out = CIContext(options: [.useSoftwareRenderer: false]).createCGImage(ci, from: ci.extent) else { return UIImage(cgImage: small) }
-        return UIImage(cgImage: out)
+        NX18Blur.blur(ctx)
+        return ctx.makeImage().map { UIImage(cgImage: $0) }
     }
 
     // The app icon: the asset catalog's (build_ipa.sh's AppIcon), else the largest the Info.plist names

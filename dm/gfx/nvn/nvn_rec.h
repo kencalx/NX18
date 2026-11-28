@@ -139,12 +139,23 @@ enum {
     RO_FLUSH,   // the held submissions go to the queue here (rec_flush_held: a present of the game's own texture)
 };
 typedef struct { uint32_t op, nobj; uint64_t a[15]; } rec_t;   // the first nobj slots hold retained objects (0 for nil), released once the call is made
-enum { REC_BLK = 256, REC_ALIGN = 128 };
+enum { REC_BLK_OLD = 256, REC_BLK_DEFAULT = 1024, REC_BLK_MAX = 2048, REC_ALIGN = 128 };
 // A record is one 128-byte cache line of Apple's cores, written by the submit thread and read by the encode thread: r[] starts on a line (it was at offset 16, so every record
 // spanned two lines and each line moved between the cores twice), and blocks are allocated on a line (rec_blk_new: posix_memalign; malloc promises 16 bytes)
-typedef struct rec_blk { struct rec_blk *next; int n; _Alignas(REC_ALIGN) rec_t r[REC_BLK]; } rec_blk;
+typedef struct rec_blk { struct rec_blk *next; int n; _Alignas(REC_ALIGN) rec_t r[]; } rec_blk;
 _Static_assert(sizeof(rec_t) == REC_ALIGN && offsetof(rec_blk, r) % REC_ALIGN == 0, "a record is one cache line, and r[] starts on one");
-static rec_blk *rec_blk_new(void) { void *p = NULL; if (posix_memalign(&p, REC_ALIGN, sizeof(rec_blk))) MDIE("deferred encoding: out of memory"); return p; }
+// Records a block holds: DM_NVN_REC_BLK=<n> (16 to 2048; 0: 256, the old size), read once before the first block. A block goes to the encode thread when it is full, at a commit, a cut
+// segment or a drain, and each hand-over to a sleeping encode thread is a wake (g_rb_wakes, the threads line). Upstream NXNative 6ccaca8e2 went from 256 to 2048; NX 18 takes 1024 by
+// default, as a larger block also starts the encode thread later in a submission, so more of a submission's encoding is left after its commit
+static int g_rec_blk;
+static int rec_blk_n(void) {
+    if (__builtin_expect(g_rec_blk > 0, 1)) return g_rec_blk;
+    const char *e = getenv("DM_NVN_REC_BLK"); int v = e && *e ? atoi(e) : REC_BLK_DEFAULT; if (e && *e && !v) v = REC_BLK_OLD;
+    g_rec_blk = v < 16 ? 16 : v > REC_BLK_MAX ? REC_BLK_MAX : v;
+    if (e && *e) MLOG("DM_NVN_REC_BLK=%s: the encode thread's blocks hold %d records (%d by default)", e, g_rec_blk, REC_BLK_DEFAULT);
+    return g_rec_blk;
+}
+static rec_blk *rec_blk_new(void) { void *p = NULL; if (posix_memalign(&p, REC_ALIGN, offsetof(rec_blk, r) + (size_t)rec_blk_n() * sizeof(rec_t))) MDIE("deferred encoding: out of memory"); return p; }
 
 // On by default on iOS: Breath of the Wild on an iPhone 17 Pro Max (handheld, the Great Plateau) took about 8 ms of submit thread per frame without it and 3.3–4.5 ms with it
 static int g_rec = -1;
@@ -511,8 +522,14 @@ static void rec_publish(void) {
     if (g_rb_sleeping) pthread_cond_signal(&g_rb_work);
     pthread_mutex_unlock(&g_rb_mu);
 }
-static rec_t *rec_put(uint32_t op, uint32_t nobj) {
-    if (g_rb_cur && g_rb_cur->n == REC_BLK) rec_publish();
+static __attribute__((noinline)) rec_t *rec_put_slow(uint32_t op, uint32_t nobj);
+static inline rec_t *rec_put(uint32_t op, uint32_t nobj) {
+    rec_blk *b = g_rb_cur;
+    if (__builtin_expect(b && b->n < g_rec_blk, 1)) { rec_t *r = &b->r[b->n++]; r->op = op; r->nobj = nobj; return r; }
+    return rec_put_slow(op, nobj);
+}
+static __attribute__((noinline)) rec_t *rec_put_slow(uint32_t op, uint32_t nobj) {
+    if (g_rb_cur && g_rb_cur->n >= rec_blk_n()) rec_publish();
     if (!g_rb_cur) {
         pthread_mutex_lock(&g_rb_mu);
         if (!g_rb_started) { pthread_t th; pthread_attr_t at; if (!g_rx_ev) g_rx_ev = [g_dev newSharedEvent]; /* made before the thread: the replay reads it too (rec_gpu_busy) */ pthread_attr_init(&at); pthread_attr_setstacksize(&at, 1 << 20);
@@ -573,7 +590,7 @@ static rec_blk *rec_own_begin(void) {
     if (!b) b = rec_blk_new();
     b->n = 0; return b;
 }
-static rec_t *rec_own_put(rec_blk *b, uint32_t op, uint32_t nobj) { if (b->n == REC_BLK) MDIE("deferred encoding: an own block is full"); rec_t *r = &b->r[b->n++]; r->op = op; r->nobj = nobj; return r; }
+static rec_t *rec_own_put(rec_blk *b, uint32_t op, uint32_t nobj) { if (b->n >= rec_blk_n()) MDIE("deferred encoding: an own block is full"); rec_t *r = &b->r[b->n++]; r->op = op; r->nobj = nobj; return r; }
 static void rec_own_push(rec_blk *b) {
     pthread_mutex_lock(&g_rb_mu);
     b->next = NULL; if (g_rb_tail) g_rb_tail->next = b; else g_rb_head = b; g_rb_tail = b;

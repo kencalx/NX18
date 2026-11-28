@@ -1233,8 +1233,50 @@ static int six_at(SixAxisState *s, int64_t samp, const live_hist *src, int shake
     if (src->n) { motion_sample ms; int held = live_at(src->r, src->n, (uint64_t)samp * SIX_PERIOD_NS, &ms); six_sample_live(s, samp, &ms, shakes); return held; }
     six_sample(s, samp, shakes); return 0;
 }
+// Whether the game wants six-axis samples (dm_six_axis_wanted, dm_input.h), so a front end runs the phone's motion sensors only then (DmGamepad.m, DM_MOTION_ON_DEMAND): a handle
+// started (StartSixAxisSensor) and not yet stopped, or the npad IMU on (EnableNpadImu, the Switch 2 SDKs' fusion). A game that reads the sensor before it has started any (or never
+// starts one) wants it from that read on, until its first start, after which only starts and stops decide. The host's own answers do not depend on this: it always samples (live
+// motion while a front end reports it, else at rest). Each change calls the front end's hook (dm_six_axis_hook), which reads dm_six_axis_wanted again; the first want is logged once
+enum { SIX_STARTED_MAX = 32 };
+static pthread_mutex_t g_six_mu = PTHREAD_MUTEX_INITIALIZER;
+static uint32_t g_six_started[SIX_STARTED_MAX];
+static int g_six_nstarted, g_six_overflow, g_six_imu, g_six_start_seen, g_six_read_early, g_six_logged;
+static _Atomic int g_six_want, g_six_read_noted;   // g_six_read_noted: six_read_note has nothing more to do (a read noted, or a start seen)
+static void (*_Atomic g_six_hook)(void);
+void dm_six_axis_hook(void (*cb)(void)) { atomic_store(&g_six_hook, cb); }
+int dm_six_axis_wanted(void) { return atomic_load(&g_six_want); }
+static void six_want_update(const char *why, uint32_t h) {   // with g_six_mu held; returns with it released, then calls the hook on a change
+    int want = g_six_start_seen ? g_six_nstarted > 0 || g_six_overflow || g_six_imu : g_six_read_early;
+    int changed = atomic_exchange(&g_six_want, want) != want, first = want && !g_six_logged;
+    if (first) g_six_logged = 1;
+    pthread_mutex_unlock(&g_six_mu);
+    if (first) LOG("hid: the game uses the six-axis sensor (%s, handle %#x): the front end's motion sensors run while it does", why, h);
+    void (*cb)(void) = atomic_load(&g_six_hook);
+    if (changed && cb) cb();
+}
+static void six_started(uint32_t h, int on) {
+    pthread_mutex_lock(&g_six_mu);
+    g_six_start_seen = 1; atomic_store(&g_six_read_noted, 1);
+    int i = 0; while (i < g_six_nstarted && g_six_started[i] != h) i++;
+    if (on && i == g_six_nstarted) { if (i < SIX_STARTED_MAX) g_six_started[g_six_nstarted++] = h; else g_six_overflow = 1; }   // past 32 handles: wanted for the rest of the run
+    if (!on && i < g_six_nstarted) g_six_started[i] = g_six_started[--g_six_nstarted];
+    six_want_update(on ? "StartSixAxisSensor" : "StopSixAxisSensor", h);
+}
+static void six_imu_want(int on) {
+    pthread_mutex_lock(&g_six_mu);
+    g_six_start_seen = 1; atomic_store(&g_six_read_noted, 1); g_six_imu = on;
+    six_want_update(on ? "EnableNpadImu" : "DisableNpadImu", 0);
+}
+static inline void six_read_note(uint32_t h) {   // a read: one relaxed load once noted
+    if (atomic_load_explicit(&g_six_read_noted, memory_order_relaxed)) return;
+    pthread_mutex_lock(&g_six_mu);
+    if (!g_six_start_seen) g_six_read_early = 1;
+    atomic_store(&g_six_read_noted, 1);
+    six_want_update("a read before any start", h);
+}
 static int six_states(SixAxisState *out, int n, uint32_t h) {
     if (n <= 0) return 0;
+    six_read_note(h);
     if (!six_connected(h)) { memset(out, 0, sizeof *out * (size_t)n); return 0; }
     static _Thread_local live_hist src;   // 10 KB: off the guest thread's stack
     int64_t samp = answer_tick(&g_hwm_states, h, (int64_t)(guest_ns() / SIX_PERIOD_NS)), first = samp - n + 1;
@@ -1253,7 +1295,7 @@ HLE_FORCE("_ZN2nn3hid23GetSixAxisSensorHandlesEPNS0_19SixAxisSensorHandleEiRKjNS
     for (int i = 0; i < k; i++) h[i] = idx | (*id & 0xff) << 8 | ((uint32_t)i + dev0) << 16;
     return k;
 }
-HLE_FORCE("_ZN2nn3hid18StartSixAxisSensorERKNS0_19SixAxisSensorHandleE", "six-axis sensor; always sampling on the host", void, h_hid_SixStart, const uint32_t *h) { (void)h; }
+HLE_FORCE("_ZN2nn3hid18StartSixAxisSensorERKNS0_19SixAxisSensorHandleE", "six-axis sensor; always sampling on the host", void, h_hid_SixStart, const uint32_t *h) { if (h) six_started(*h, 1); }
 // Merged mouse pointer (Nmouse, Switch 2 SDKs; Pokemon Pokopia, main+0x11251dc). The SDK opens the hid service itself in InitializeNmouse, which the host does not serve (abort 0xe15). No device
 // reports here: GetNmouseHandles finds none and the merged handle, which exists without a device on the console, has no states. The game skips its mouse code on those answers (main+0x112638c, +0x11262b4)
 static _Atomic uint32_t g_jcms_wanted;   // the game reads the mouse sensors (dm_joy_mouse_wanted, with InitializeJcms below)
@@ -1356,10 +1398,12 @@ HLE_FORCE("_ZN2nn3hid13EnableNpadImuEPvm", "npad IMU on with the game's buffer; 
     Result r = g_imu_on ? RES_NPAD_IMU_ENABLED : 0;
     if (!r) { g_imu_buf = buf; g_imu_on = 1; }
     pthread_mutex_unlock(&g_imu_lock);
+    if (!r) six_imu_want(1);
     return r;
 }
 HLE_FORCE("_ZN2nn3hid14DisableNpadImuEv", "npad IMU off", Result, h_hid_ImuDisable, void) {
     pthread_mutex_lock(&g_imu_lock); g_imu_buf = NULL; g_imu_on = 0; pthread_mutex_unlock(&g_imu_lock);
+    six_imu_want(0);
     return 0;
 }
 HLE_FORCE("_ZN2nn3hid16IsNpadImuEnabledEv", "npad IMU state as the host keeps it", int, h_hid_ImuIs, void) {
@@ -1476,6 +1520,7 @@ static int imu_sample(NpadImuSample *o, int64_t tick, const live_hist *src, int 
 HLE_FORCE("_ZN2nn3hid17GetNpadImuSamplesEPNS0_13NpadImuSampleEiNS0_13NpadImuHandleE", "npad IMU samples: the device's six-axis state at the newest 5 ms ticks, oldest first",
           int, h_hid_ImuSamples, void *out, int n, uint32_t imu_handle) {
     pthread_once(&g_imu_once, imu_env_read);
+    six_read_note(imu_handle);
     int slot, dev;
     if (!out || n <= 0 || six_handle_slot(NULL, imu_handle, &slot, &dev) != RES_OK || !six_connected(imu_handle) || !h_hid_ImuIs()) return 0;
     static _Thread_local live_hist src;
@@ -1833,9 +1878,10 @@ HLE_FORCE("_ZN2nn3hid16GetGestureStatesEPNS0_12GestureStateEi", "gesture states,
 }
 
 // Six-axis details: the current state, at rest unless shaking, fusion off
-HLE_FORCE("_ZN2nn3hid17StopSixAxisSensorERKNS0_19SixAxisSensorHandleE", "six-axis sensor; always sampling on the host", void, h_hid_SixStop, const uint32_t *h) { (void)h; }
+HLE_FORCE("_ZN2nn3hid17StopSixAxisSensorERKNS0_19SixAxisSensorHandleE", "six-axis sensor; always sampling on the host", void, h_hid_SixStop, const uint32_t *h) { if (h) six_started(*h, 0); }
 HLE_FORCE("_ZN2nn3hid21GetSixAxisSensorStateEPNS0_18SixAxisSensorStateERKNS0_19SixAxisSensorHandleE", "six-axis sensor current state", void, h_hid_SixState, SixAxisState *s, const uint32_t *h) { six_states(s, 1, *h); }
 HLE_FORCE("_ZN2nn3hid21IsSixAxisSensorAtRestERKNS0_19SixAxisSensorHandleE", "six-axis sensor at rest: yes unless player 1's is shaking or a live controller is turning", unsigned, h_hid_SixRest, const uint32_t *h) {
+    six_read_note(*h);
     int pl = player_of(*h >> 8 & 0xff); motion_state ms;
     if (motion_live(pl, &ms)) return fabsf(ms.gyro[0]) + fabsf(ms.gyro[1]) + fabsf(ms.gyro[2]) < 0.01f && !(pl == 0 && shaking(guest_ns()));
     return pl != 0 || !shaking(guest_ns());

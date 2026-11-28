@@ -90,6 +90,124 @@ static void compute_case(NvShader *cs, id<MTLComputePipelineState> pso, int reve
     CHECK(p[0]==(reverse?0:1)&&p[1]==(reverse?1:0)&&p[2]==0&&p[3]==1,"first dispatch reads the current CPU backing in a new submission");
     CHECK(p[4]==(reverse?1:0)&&p[5]==(reverse?0:1)&&p[6]==0&&p[7]==1,"second dispatch reads the new handle after inline update");
 }
+// Across submissions (upstream NXNative 8955c6bde's cross-submission case, adapted): an unchanged table is written again into each new submission's frame arena (DM_NVN_HTAB_ARENA)
+// without a build or a g_psnap_gen move, never naming an earlier submission's arena slice, also after that block is reclaimed and written over, and after an unrelated registration.
+// Off (=0), the table keeps a buffer of its own across submissions, as before
+static void htab_dispatch(NvShader *cs, id<MTLComputePipelineState> pso, uint8_t *ubo, id<MTLBuffer> result, const char *what) {
+    S.ubo[5][0] = (p_bind_buf){.addr = (uint64_t)ubo, .size = 16};
+    id<MTL4ComputeCommandEncoder> ce = dispatch_enc(); enc_c_pso(ce, pso);
+    CHECK(encode_args((id<MTLCommandEncoder>)ce, cs, 5, 0), what);
+    enc_c_args(ce, result.gpuAddress, 1); enc_c_dispatch(ce, MTLSizeMake(1, 1, 1), MTLSizeMake(1, 1, 1));
+}
+static int red(id<MTLBuffer> result) { const float *p = result.contents; return p[0] == 1 && p[1] == 0 && p[2] == 0 && p[3] == 1; }
+static int arena_holds(uint64_t gpu) { for (NvArena *a in g_sub_arenas) if (gpu >= a->gpu && gpu < a->gpu + a->len) return 1; return 0; }
+static void cross_sub_case(NvShader *cs, id<MTLComputePipelineState> pso, const tex_t *unrelated) {
+    const int ar = g_htab_arena > 0;
+    uint8_t *ubo = mem + 0x100; uint64_t handle = 1 | (1ull << 20); memset(ubo, 0, 64); memcpy(ubo, &handle, 8);
+    id<MTLBuffer> result = [g_dev newBufferWithLength:16 options:MTLResourceStorageModeShared]; CHECK(result != nil, "cross-submission readback allocated"); if (!result) return; res_add(result);
+    uint64_t b0 = g_stat_htab_builds, e0 = g_stat_htab_emits;
+    state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin(); htab_dispatch(cs, pso, ubo, result, "submission 1 encodes the tables");
+    uint64_t gpu1 = g_htab_last->gpu, b1 = g_stat_htab_builds, pg1 = g_psnap_gen;
+    CHECK(b1 == b0 + 2, "the first submission builds the texture and sampler tables once each");
+    CHECK(ar ? arena_holds(gpu1) && g_htab_last->epoch == g_arena_epoch && !g_htab_last->buf : g_htab_last->buf && gpu1 == g_htab_last->buf.gpuAddress, ar ? "the table is a slice of this submission's arena" : "off: the table is a buffer of its own");
+    CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "submission 1 completed"); CHECK(red(result), "submission 1 reads the red texture");
+    memset(result.contents, 0, 16);
+    state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin(); htab_dispatch(cs, pso, ubo, result, "submission 2 encodes the tables");
+    CHECK(g_stat_htab_builds == b1 && g_psnap_gen == pg1, "an unchanged table in a new submission is not built again and keeps g_psnap_gen");
+    CHECK(ar ? g_htab_last->gpu != gpu1 && arena_holds(g_htab_last->gpu) && g_stat_htab_emits == e0 + 2 : g_htab_last->gpu == gpu1 && g_stat_htab_emits == e0, ar ? "it is written again into the new submission's arena" : "off: it keeps its buffer");
+    CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "submission 2 completed"); CHECK(red(result), "submission 2 reads the red texture");
+    // Submission 3: the block the last one ended in is not taken back (g_arena_next), so the arena gives a reclaimed block from its start, written over here before the table is asked for
+    g_arena_next = nil; memset(result.contents, 0, 16);
+    state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin();
+    __unsafe_unretained id<MTLBuffer> scratch = nil; arena_at clobber = arena_take_u(4096, &scratch); memset(clobber.cpu, 0xff, 4096);
+    htab_dispatch(cs, pso, ubo, result, "submission 3 encodes the tables after an arena block is reclaimed");
+    CHECK(!ar || (g_htab_last->epoch == g_arena_epoch && g_htab_last->gpu >= clobber.gpu + 4096), "the table is written past what this submission wrote over");
+    CHECK(g_stat_htab_builds == b1 && g_psnap_gen == pg1, "after the reclaim the table is still not built again");
+    CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "submission 3 completed"); CHECK(red(result), "submission 3 reads the red texture over a reclaimed, overwritten block");
+    // Submission 4: a registration of another ID moves g_reg_gen; the entries come out the same, so no build and no g_psnap_gen move
+    mtl_reg_tex(9, unrelated, NULL); memset(result.contents, 0, 16);
+    state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin(); htab_dispatch(cs, pso, ubo, result, "submission 4 encodes the tables after an unrelated registration");
+    CHECK(g_stat_htab_builds == b1 && g_psnap_gen == pg1 && g_ht_how == HT_SAMEIDS, "an unrelated registration with the same entries is not a build");
+    CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "submission 4 completed"); CHECK(red(result), "submission 4 reads the red texture");
+    mtl_reg_tex(9, NULL, NULL);
+    // Negative control (on only): the snapshot's slice of an earlier submission taken as current (a missing epoch check), its bytes since rewritten as a reclaimed block's would be
+    // (here with texture 2's entry, green): the dispatch then reads green, which the checks above would have failed
+    if (ar) {
+        htab_snap *ts = NULL; for (int i = 0; i < HTAB_SNAPS; i++) if (g_htab[i].valid && !g_htab[i].samp && g_htab[i].addr == (uint64_t)ubo) ts = &g_htab[i];
+        CHECK(ts != NULL, "the texture table's snapshot is found");
+        if (ts) {
+            memset(result.contents, 0, 16);
+            state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin();
+            NvArena *old = nil; for (NvArena *a in g_arenas) if (ts->gpu >= a->gpu && ts->gpu < a->gpu + a->len) old = a;
+            for (NvArena *a in g_sub_arenas) if (ts->gpu >= a->gpu && ts->gpu < a->gpu + a->len) old = a;
+            void *tv = NULL; os_unfair_lock_lock(&g_rmu); uint64_t green = tex_fast_rid(2, &tv); os_unfair_lock_unlock(&g_rmu);
+            CHECK(old && green, "the old slice's block and texture 2's resource ID are found");
+            if (old && green) {
+                memcpy(old->cpu + (ts->gpu - old->gpu) + DMSH_POOL_HEAD, &green, 8);
+                ts->epoch = g_arena_epoch; ts->abuf = old->buf;   // the broken form
+                htab_dispatch(cs, pso, ubo, result, "the negative control encodes");
+                CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "the negative control's submission completed");
+                const float *q = result.contents;
+                CHECK(q[0] == 0 && q[1] == 1 && q[2] == 0 && q[3] == 1, "negative control: an earlier submission's slice taken as current reads what its block holds now");
+            } else mtl_wait(mtl_sub_commit(), 5000000000ull);
+            ts->valid = 0;   // let go, so later cases build afresh
+        }
+    }
+}
+// A table naming a retired registration's view (its texture finalized, read late in that submission: the view goes at the submission's end, treg_finish_submission) is resolved again
+// in the next submission, which makes the view again (on). The generations are put back as a steady frame leaves them (here the commit's own serial notes move g_ser_gen), so only
+// the submission note (sub_trans) can send it there. control: the note cleared, the broken form: the next submission keeps the old entries and no view is made (a dropped view's ID)
+static void trans_case(NvShader *cs, id<MTLComputePipelineState> pso, tex_t *tx, int id_, int control) {
+    if (g_htab_arena <= 0) return;
+    uint8_t *ubo = mem + 0x200 + 0x40 * control; uint64_t handle = (uint64_t)id_ | (1ull << 20); memset(ubo, 0, 64); memcpy(ubo, &handle, 8);
+    id<MTLBuffer> result = [g_dev newBufferWithLength:16 options:MTLResourceStorageModeShared]; res_add(result);
+    state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin();
+    mtl_tex_release(tx);   // the ID retires; a late read in this submission makes a transient view
+    htab_dispatch(cs, pso, ubo, result, "the retired registration's submission encodes");
+    htab_snap *ts = g_htab_last; for (int i = 0; i < HTAB_SNAPS; i++) if (g_htab[i].valid && !g_htab[i].samp && g_htab[i].addr == (uint64_t)ubo) ts = &g_htab[i];   // the texture table (the sampler table is asked for last)
+    int took = 0; for (uint32_t k = 0; k < ts->n; k++) took |= ts->ser[k] == tx->serial;
+    CHECK(took && g_treg[id_].retired && g_treg[id_].transient_sub == g_sub_serial && g_treg[id_].view, "the table names the retired registration's view of this submission");
+    CHECK(ts->sub_trans == g_sub_serial, "the snapshot notes the submission whose view it names");
+    CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "the retired registration's submission completed");
+    CHECK(!g_treg[id_].view, "the transient view went at that submission's end");
+    state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin();
+    ts->sgen = atomic_load(&g_ser_gen); ts->reg = atomic_load(&g_reg_gen); if (control) ts->sub_trans = 0;
+    htab_dispatch(cs, pso, ubo, result, "the next submission encodes");
+    if (!control) {
+        CHECK(ts->sub_trans == g_sub_serial && g_treg[id_].view, "the next submission resolves the table again, making the view again");
+        CHECK(ts->elems[0] == g_treg[id_].view_rid, "its entry is the view made in this submission (the same resource ID may come back: then the same entries)");
+    } else CHECK(!g_treg[id_].view && ts->sub == g_sub_serial, "negative control: without the note, the next submission keeps the entries of a view that went");
+    CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "the next submission completed");
+}
+// T_HTAB_BENCH=1: the cost of a table build (each of 256 uniform blocks of 8 handles in turn, more than the 64 snapshots hold, so each lookup builds) and of an unchanged table's first
+// look in a new submission (8 blocks), per call, best of 5, with the switch as set
+static void bench(void) {
+    static mach_timebase_info_data_t tb; mach_timebase_info(&tb);
+    nvn_rbind b = {.kind = NVN_RB_TEXH, .reg = 0, .dtt = MTLTextureType2D};
+    uint8_t *blk = mem + 0x8000; for (int i = 0; i < 256; i++) for (int k = 0; k < 8; k++) { uint64_t h = (uint64_t)(1 + (i + k) % 3) | (1ull << 20); memcpy(blk + 64 * i + 8 * k, &h, 8); }
+    double best_b = 1e9, best_r = 1e9;
+    for (int round = 0; round < 5; round++) {
+        state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin(); __unsafe_unretained id<MTLBuffer> pb = nil;
+        uint64_t t0 = mach_absolute_time();
+        os_unfair_lock_lock(&g_rmu);
+        for (int i = 0; i < 2048; i++) { S.ubo[5][0] = (p_bind_buf){.addr = (uint64_t)(blk + 64 * (i % 256)), .size = 64}; htab_gpu(5, &b, &pb); }
+        os_unfair_lock_unlock(&g_rmu);
+        double ns = (double)(mach_absolute_time() - t0) * tb.numer / tb.denom / 2048; if (ns < best_b) best_b = ns;
+        mtl_wait(mtl_sub_commit(), 5000000000ull);
+        double rn = 0;
+        for (int s2 = 0; s2 < 64; s2++) {
+            state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin();
+            os_unfair_lock_lock(&g_rmu);
+            uint64_t t1 = mach_absolute_time();
+            for (int i = 0; i < 8; i++) { S.ubo[5][0] = (p_bind_buf){.addr = (uint64_t)(blk + 64 * i), .size = 64}; htab_gpu(5, &b, &pb); }
+            rn += (double)(mach_absolute_time() - t1) * tb.numer / tb.denom / 8;
+            os_unfair_lock_unlock(&g_rmu);
+            mtl_wait(mtl_sub_commit(), 5000000000ull);
+        }
+        if (rn / 64 < best_r) best_r = rn / 64;
+    }
+    printf("t_htab_update bench (DM_NVN_HTAB_ARENA=%d): a build %.0f ns, an unchanged table's first look in a new submission %.0f ns\n", g_htab_arena, best_b, best_r);
+}
 int main(void) { @autoreleasepool {
     alarm(45);setenv("DM_PSO_ARCHIVE","off",1);setenv("DM_PSO_PREBUILD","0",1);setenv("DM_PSO_MANIFEST","off",1);setenv("DM_PSO_USER","/dev/null",1);setenv("DM_PSO_RECORD","/dev/null",1);
     mtl_init();NSError *error=nil;
@@ -115,5 +233,8 @@ int main(void) { @autoreleasepool {
     render_case(fs,pso,1|(1ull<<20),2|(1ull<<20),0,1);
     compute_case(cs,cps,0);
     compute_case(cs,cps,1);
+    cross_sub_case(cs,cps,&t[0]);
+    for (int c = 0; c < 2; c++) { tex_t tx; id<MTLTexture> tex=texture(&tx,2,1); if(!tex)return 2; [tex replaceRegion:MTLRegionMake2D(0,0,2,1) mipmapLevel:0 withBytes:values[0] bytesPerRow:8]; tx.mem=mem+0x5000+0x1000*c; tx.L.size=8; memcpy((void *)tx.mem,values[0],8); mtl_reg_tex(4+c,&tx,NULL); trans_case(cs,cps,&tx,4+c,c); }
+    if (getenv("T_HTAB_BENCH")) bench();
     printf("t_htab_update: %d checks, %d failed\n",checks,failed);return failed!=0;
 } }

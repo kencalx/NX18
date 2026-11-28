@@ -8,6 +8,15 @@
 #include <unistd.h>
 #include "save_sync.h"
 
+// The save's file name for the log, never its path: the cloud folder's path carries the folder's name, which the player chose (and may carry their name). An error is its
+// domain and code (and the underlying one's), not its description, which names the folder too
+static const char *shown(const char *path) { const char *s = strrchr(path, '/'); return s ? s + 1 : path; }
+static NSString *why(NSError *e) {
+    if (!e) return @"no reason given";
+    NSError *u = e.userInfo[NSUnderlyingErrorKey];
+    return u ? [NSString stringWithFormat:@"%@ %ld, %@ %ld", e.domain, (long)e.code, u.domain, (long)u.code] : [NSString stringWithFormat:@"%@ %ld", e.domain, (long)e.code];
+}
+
 #define MATERIALIZE_S 60   // the longest a fetch waits for a listed iCloud item to download: the launcher's report (SaveSyncReport.waitMs); the host stops waiting sooner at the mount (FETCH_MS)
 
 int front_save_sync_fetch(const char *cloud, const char *local) {
@@ -24,7 +33,7 @@ int front_save_sync_fetch(const char *cloud, const char *local) {
             NSDate *start = [NSDate date];
             NSError *ask = nil;
             BOOL asked = [fm startDownloadingUbiquitousItemAtURL:src error:&ask];   // refused: no wait here, the coordinated read is left to download it, as before
-            if (!asked) fprintf(stderr, "[dm] save sync: iCloud did not take the download request (%s); reading the cloud's save as it is\n", ask.localizedDescription.UTF8String ?: "no reason given");
+            if (!asked) fprintf(stderr, "[dm] save sync: iCloud did not take the download request (%s); reading the cloud's save as it is\n", why(ask).UTF8String);
             NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:MATERIALIZE_S];
             while (asked && ![fm fileExistsAtPath:src.path]) {
                 NSError *failed = nil;
@@ -32,7 +41,7 @@ int front_save_sync_fetch(const char *cloud, const char *local) {
                 [src getResourceValue:&failed forKey:NSURLUbiquitousItemDownloadingErrorKey error:nil];
                 if (failed || [deadline timeIntervalSinceNow] <= 0) {
                     fprintf(stderr, "[dm] save sync: the cloud's save did not download in %.0f s%s%s\n", -[start timeIntervalSinceNow],
-                            failed ? ": " : "", failed ? (failed.localizedDescription.UTF8String ?: "no reason given") : "");
+                            failed ? ": " : "", failed ? why(failed).UTF8String : "");
                     return -1;
                 }
                 // Every 150 ms for the first 10 s, then every 500 ms: the mount stops waiting at 10 s (save_sync.c FETCH_MS) and leaves this thread polling on while the game
@@ -48,9 +57,9 @@ int front_save_sync_fetch(const char *cloud, const char *local) {
             [fm removeItemAtURL:dst error:nil];
             if ([fm copyItemAtURL:u toURL:dst error:&e]) r = 1;
             else if ([e.domain isEqualToString:NSCocoaErrorDomain] && e.code == NSFileReadNoSuchFileError) r = 0;
-            else fprintf(stderr, "[dm] [RED] save sync: copying %s from the cloud failed: %s\n", cloud, e.localizedDescription.UTF8String ?: "no reason given");
+            else fprintf(stderr, "[dm] [RED] save sync: copying %s from the cloud failed: %s\n", shown(cloud), why(e).UTF8String);
         }];
-        if (error) fprintf(stderr, "[dm] [RED] save sync: reading %s from the cloud failed: %s\n", cloud, error.localizedDescription.UTF8String ?: "no reason given");
+        if (error) fprintf(stderr, "[dm] [RED] save sync: reading %s from the cloud failed: %s\n", shown(cloud), why(error).UTF8String);
         return r;
     }
 }
@@ -68,17 +77,17 @@ int front_save_sync_store(const char *local, const char *cloud) {
             NSError *e = nil;
             [fm removeItemAtPath:part error:nil];
             if (![fm copyItemAtPath:src toPath:part error:&e]) {
-                fprintf(stderr, "[dm] [RED] save sync: writing beside %s failed: %s\n", cloud, e.localizedDescription.UTF8String ?: "no reason given");
+                fprintf(stderr, "[dm] [RED] save sync: writing beside %s failed: %s\n", shown(cloud), why(e).UTF8String);
                 return;
             }
             if (rename(part.fileSystemRepresentation, u.fileSystemRepresentation)) {
-                fprintf(stderr, "[dm] [RED] save sync: replacing %s failed (errno=%d)\n", cloud, errno);
+                fprintf(stderr, "[dm] [RED] save sync: replacing %s failed (errno=%d)\n", shown(cloud), errno);
                 [fm removeItemAtPath:part error:nil];
                 return;
             }
             r = 1;
         }];
-        if (error) fprintf(stderr, "[dm] [RED] save sync: writing %s to the cloud failed: %s\n", cloud, error.localizedDescription.UTF8String ?: "no reason given");
+        if (error) fprintf(stderr, "[dm] [RED] save sync: writing %s to the cloud failed: %s\n", shown(cloud), why(error).UTF8String);
         return r;
     }
 }

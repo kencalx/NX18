@@ -59,6 +59,24 @@ static char g_time[16];
 static NSDateFormatter *g_fmt;
 static CGRect g_row, g_center; static CGFloat g_u = 1;
 static NSString *g_t1l, *g_t1r, *g_t2l, *g_t2r;   // the last texts set: set again only on a change
+// The text cache (DM_VITALS_CACHE, on by default; =0 builds every string each tick and compares the plain text, as before): each half's attributed text, width and chosen
+// drop are kept with what made them (the three drops' plain strings, the heat and Low Power Mode that colour its symbols, the size and the room), so a tick whose inputs did not
+// change costs three snprintf calls and a compare instead of up to three attributed strings, symbol images and text measurements; a label is set when its attributed text is
+// a new one, which also recolours the battery symbol when only Low Power Mode changed. The second lines and the accessibility label are compared before they are built or set
+typedef struct { char s[3][160]; int thermal, lpm; CGFloat size, room; } vit_half_key;
+static int g_vit_cache = -1;
+static vit_half_key g_hk[2]; static BOOL g_hk_ok[2]; static NSString *g_hs[2]; static NSAttributedString *g_ha[2]; static CGFloat g_hw[2];
+static NSString *g_c2s[2]; static CGFloat g_c2size[2], g_c2w[2]; static NSAttributedString *g_c2a[2];
+static NSAttributedString *g_p1l, *g_p1r, *g_p2l, *g_p2r;   // with the cache: the attributed texts last set
+static int g_cache_hits, g_cache_builds;
+static BOOL vit_cache_on(void) {
+    if (g_vit_cache < 0) { const char *e = getenv("DM_VITALS_CACHE"); g_vit_cache = !e || atoi(e) != 0; }
+    return g_vit_cache;
+}
+static void vit_texts_reset(void) {   // the next place sets every label again
+    g_t1l = g_t1r = g_t2l = g_t2r = nil; g_p1l = g_p1r = g_p2l = g_p2r = nil;
+    g_hk_ok[0] = g_hk_ok[1] = NO; g_c2s[0] = g_c2s[1] = nil;
+}
 
 static void vit_time(void) {
     if (!g_fmt) {
@@ -132,7 +150,27 @@ static CGFloat vit_size(void) {   // 13 pt; 15 pt at the player's accessibility 
 }
 
 // One half: its strings from drop 0 to 2, the first that fits `room` (text plus 8 pt a side); the last when none does
+static NSString *vit_fit_cached(int left, CGFloat room, CGFloat size, NSAttributedString **out, CGFloat *w) {
+    vit_half_key k; memset(&k, 0, sizeof k);   // padding zeroed: the key compares with memcmp
+    for (int drop = 0; drop <= 2; drop++) {
+        if (left) nvn_vitals_left(k.s[drop], sizeof k.s[drop], &g_last, g_fps, g_shown, g_w10, g_fresh, g_level == 2, drop);
+        else nvn_vitals_right(k.s[drop], sizeof k.s[drop], &g_dev, drop);
+    }
+    k.thermal = g_dev.thermal; k.lpm = g_dev.lpm; k.size = size; k.room = room;
+    if (g_hk_ok[left] && !memcmp(&k, &g_hk[left], sizeof k)) { g_cache_hits++; *out = g_ha[left]; *w = g_hw[left]; return g_hs[left]; }
+    g_cache_builds++;
+    NSString *s = nil;
+    for (int drop = 0; drop <= 2; drop++) {
+        s = @(k.s[drop]);
+        NSAttributedString *a = vit_text(s, size, NO); CGFloat aw = vit_width(a);
+        *out = a; *w = aw;
+        if (aw + 16 <= room) break;
+    }
+    g_hk[left] = k; g_hk_ok[left] = YES; g_hs[left] = s; g_ha[left] = *out; g_hw[left] = *w;
+    return s;
+}
 static NSString *vit_fit(int left, CGFloat room, CGFloat size, NSAttributedString **out, CGFloat *w) {
+    if (vit_cache_on()) return vit_fit_cached(left, room, size, out, w);
     char b[160]; NSString *s = nil;
     for (int drop = 0; drop <= 2; drop++) {
         if (left) nvn_vitals_left(b, sizeof b, &g_last, g_fps, g_shown, g_w10, g_fresh, g_level == 2, drop);
@@ -152,7 +190,9 @@ static void vit_accessibility(void) {   // one element, read in words on focus; 
     const char *h = nvn_vitals_heat_word(g_dev.thermal); if (h) [p addObject:@(h)];
     if (g_dev.bat_pct >= 0) [p addObject:[NSString stringWithFormat:@"Battery %d percent%@", g_dev.bat_pct, g_dev.bat_state == 2 ? @", charging" : @""]];
     if (g_time[0]) [p addObject:@(g_time)];
-    g_view.accessibilityLabel = [p componentsJoinedByString:@". "];
+    NSString *label = [p componentsJoinedByString:@". "];
+    if (vit_cache_on() && [label isEqualToString:g_view.accessibilityLabel]) return;
+    g_view.accessibilityLabel = label;
 }
 
 static void vit_place(void) {   // main thread: fit both halves into the row, either side of − (≡) +
@@ -167,13 +207,29 @@ static void vit_place(void) {   // main thread: fit both halves into the row, ei
     char b2[96]; NSString *l2 = @"", *r2 = @"";
     if (g_level == 2) { nvn_vitals_left2(b2, sizeof b2, &g_last, g_fresh); l2 = @(b2); nvn_vitals_right2(b2, sizeof b2, &g_last, g_fresh); r2 = @(b2); }
     CGFloat size2 = size - 2, h2 = l2.length || r2.length ? round(size2 * 1.5) : 0;
-    NSAttributedString *la2 = l2.length ? vit_text(l2, size2, YES) : nil, *ra2 = r2.length ? vit_text(r2, size2, YES) : nil;
-    CGFloat lw2 = la2 ? vit_width(la2) : 0, rw2 = ra2 ? vit_width(ra2) : 0;
+    NSAttributedString *la2, *ra2; CGFloat lw2, rw2;
     DmVitalsPill *L = g_view.left, *R = g_view.right;
-    if (![ls isEqualToString:g_t1l]) { L.line1.attributedText = la; g_t1l = ls; }
-    if (![rs isEqualToString:g_t1r]) { R.line1.attributedText = ra; g_t1r = rs; }
-    if (![l2 isEqualToString:g_t2l]) { L.line2.attributedText = la2; g_t2l = l2; }
-    if (![r2 isEqualToString:g_t2r]) { R.line2.attributedText = ra2; g_t2r = r2; }
+    if (vit_cache_on()) {
+        NSString *t2[2] = {l2, r2}; NSAttributedString *a2[2]; CGFloat w2[2];
+        for (int i = 0; i < 2; i++) {
+            if (!g_c2s[i] || g_c2size[i] != size2 || ![t2[i] isEqualToString:g_c2s[i]]) {
+                g_c2a[i] = t2[i].length ? vit_text(t2[i], size2, YES) : nil; g_c2w[i] = g_c2a[i] ? vit_width(g_c2a[i]) : 0; g_c2s[i] = t2[i]; g_c2size[i] = size2;
+            }
+            a2[i] = g_c2a[i]; w2[i] = g_c2w[i];
+        }
+        la2 = a2[0]; ra2 = a2[1]; lw2 = w2[0]; rw2 = w2[1];
+        if (la != g_p1l) { L.line1.attributedText = la; g_p1l = la; }
+        if (ra != g_p1r) { R.line1.attributedText = ra; g_p1r = ra; }
+        if (la2 != g_p2l || !g_t2l) { L.line2.attributedText = la2; g_p2l = la2; g_t2l = l2; }
+        if (ra2 != g_p2r || !g_t2r) { R.line2.attributedText = ra2; g_p2r = ra2; g_t2r = r2; }
+    } else {
+        la2 = l2.length ? vit_text(l2, size2, YES) : nil; ra2 = r2.length ? vit_text(r2, size2, YES) : nil;
+        lw2 = la2 ? vit_width(la2) : 0; rw2 = ra2 ? vit_width(ra2) : 0;
+        if (![ls isEqualToString:g_t1l]) { L.line1.attributedText = la; g_t1l = ls; }
+        if (![rs isEqualToString:g_t1r]) { R.line1.attributedText = ra; g_t1r = rs; }
+        if (![l2 isEqualToString:g_t2l]) { L.line2.attributedText = la2; g_t2l = l2; }
+        if (![r2 isEqualToString:g_t2r]) { R.line2.attributedText = ra2; g_t2r = r2; }
+    }
     CGFloat lW = MIN(MAX(lw, lw2) + 16, MAX(lroom, 0)), rW = MIN(MAX(rw, rw2) + 16, MAX(rroom, 0)), H = h1 + h2;
     L.frame = CGRectMake(lx, y, lW, H); R.frame = CGRectMake(rx - rW, y, rW, H);
     L.line1.frame = CGRectMake(8, 0, lW - 16, h1); R.line1.frame = CGRectMake(8, 0, rW - 16, h1); R.line1.textAlignment = NSTextAlignmentRight;
@@ -214,29 +270,32 @@ UIView *dm_vitals_view(void) {
     for (NSNotificationName nm in @[NSSystemClockDidChangeNotification, NSCurrentLocaleDidChangeNotification])
         [NSNotificationCenter.defaultCenter addObserverForName:nm object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) { (void)n; g_fmt = nil; }];
     [NSNotificationCenter.defaultCenter addObserverForName:UIContentSizeCategoryDidChangeNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) {
-        (void)n; g_t1l = g_t1r = g_t2l = g_t2r = nil; vit_place(); }];
+        (void)n; vit_texts_reset(); vit_place(); }];
     return g_view;
 }
 void dm_vitals_set_level(int level) {
     level = level < 0 ? 0 : level > 2 ? 2 : level;
     if (level != g_level) LOG("front end: Vitals %s", level == 2 ? "on (Detailed)" : level ? "on" : "off");
     g_level = level; dm_vitals_level_set(level);
-    g_t1l = g_t1r = g_t2l = g_t2r = nil;
+    vit_texts_reset();
     if (g_view) g_view.hidden = !level || g_menu;
     vit_timer_update();
     if (level && !g_menu) { vit_device(); vit_read(); vit_place(); }
 }
 int dm_vitals_get_level(void) { return g_level; }
-void dm_vitals_layout(CGRect row, CGFloat u, CGRect center) { g_row = row; g_u = u; g_center = center; g_t1l = g_t1r = nil; vit_place(); }
+void dm_vitals_layout(CGRect row, CGFloat u, CGRect center) { g_row = row; g_u = u; g_center = center; g_t1l = g_t1r = nil; g_p1l = g_p1r = nil; vit_place(); }
 void dm_vitals_menu_open(int open) {
     open = !!open; if (open == g_menu) return;
     g_menu = open; dm_vitals_menu_set(open);
     if (g_view) g_view.hidden = !g_level || open;
-    if (!open) { g_t1l = g_t1r = g_t2l = g_t2r = nil; }
+    if (!open) vit_texts_reset();
     vit_timer_update();
     if (!open && g_level) vit_place();
 }
-void dm_vitals_foreground(int fg) { g_fg = !!fg; vit_timer_update(); }
+void dm_vitals_foreground(int fg) {
+    g_fg = !!fg; vit_timer_update();
+    if (!fg && g_cache_hits + g_cache_builds) { LOG("front end: Vitals text: %d halves reused, %d built (DM_VITALS_CACHE)", g_cache_hits, g_cache_builds); g_cache_hits = g_cache_builds = 0; }   // each trip away from the game
+}
 const char *dm_vitals_compact_text(int drop) {
     static char b[160];
     if (!g_timer) { vit_device(); vit_read(); }   // a read before the first tick

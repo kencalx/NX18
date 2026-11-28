@@ -15,6 +15,7 @@ struct BuiltFrom: Codable, Sendable, Equatable {
     var changes: String?         // a digest of the uncommitted changes to tracked files (git diff HEAD), nil when there are none
     var chain: String?           // DMSH_CHAIN
     var guessed: Bool?           // a build from before Beam recorded this: the commit HEAD was at the build's time (the checkout's reflog)
+    var dirty: [String]?         // the files of those uncommitted changes: what the app had that the commit does not, which a later revert leaves out of git's diff
 }
 
 enum NX18Git {
@@ -50,11 +51,12 @@ enum NX18Git {
     /// The checkout as it is now
     static func stamp(of folder: URL) -> BuiltFrom {
         let commit = line(run(folder, ["rev-parse", "--verify", "-q", "HEAD"]))
-        var changes: String?
+        var changes: String?, dirty: [String]?
         if commit != nil, let diff = run(folder, ["diff", "HEAD", "--binary", "--no-color", "--no-ext-diff"]), !diff.isEmpty {
             changes = SHA256.hash(data: diff).map { String(format: "%02x", $0) }.joined()
+            dirty = run(folder, ["diff", "HEAD", "--name-only", "-z", "--no-renames"]).map { $0.split(separator: 0).map { String(decoding: $0, as: UTF8.self) } }
         }
-        return BuiltFrom(commit: commit, changes: changes, chain: chain(of: folder))
+        return BuiltFrom(commit: commit, changes: changes, chain: chain(of: folder), dirty: dirty)
     }
 
     /// The files that differ between `commit` and the checkout's files now (commits since, and uncommitted changes); nil when git cannot say
@@ -109,7 +111,10 @@ enum RebuildRule {
         guard built.commit != nil, now.commit != nil else { return .unknown }
         if built.commit == now.commit && built.changes == now.changes { return nil }
         guard let changed else { return .unknown }
-        return changed.contains { affects($0, titles: titles) } ? .nx18 : nil
+        // a build with uncommitted changes: git's diff from its commit to the files now misses them once they are reverted, so its own changed files count too;
+        // a record with the changes' digest but not their files (from before Beam kept them) cannot say which: rebuild
+        if built.changes != nil && built.dirty == nil { return .nx18 }
+        return (changed + (built.dirty ?? [])).contains { affects($0, titles: titles) } ? .nx18 : nil
     }
 
     /// The profile folders a game's app is made from: its title ID, its profile's ID (a regional release builds with another's), its programs'

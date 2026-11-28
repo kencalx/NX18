@@ -5,27 +5,54 @@ import Foundation
 /// A command-line tool's run: its exit code and output (a small helper for xcrun, xcodebuild, security)
 enum Tool {
     struct Result: Sendable { var code: Int32; var out: String; var err: String }
-    static func run(_ exe: String, _ args: [String], log: URL? = nil) async throws -> Result {
+    /// `log`: the output is written there, through `logFilter` when one is given (the player's signing details out of xcodebuild.log, XcodeSigning.redacted)
+    static func run(_ exe: String, _ args: [String], log: URL? = nil, logFilter: (@Sendable (String) -> String)? = nil) async throws -> Result {
         let p = Process(); p.executableURL = URL(fileURLWithPath: exe); p.arguments = args
         let o = Pipe(), e = Pipe(); p.standardOutput = o; p.standardError = e; p.standardInput = FileHandle.nullDevice
         let outTask = Task.detached { o.fileHandleForReading.readDataToEndOfFile() }
         let errTask = Task.detached { e.fileHandleForReading.readDataToEndOfFile() }
-        let box = TerminateBox(p)
+        let box = ProcessBox(p)
         let code: Int32 = try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { c in
                 p.terminationHandler = { c.resume(returning: $0.terminationStatus) }
-                do { try p.run() } catch { p.terminationHandler = nil; try? o.fileHandleForWriting.close(); try? e.fileHandleForWriting.close(); c.resume(throwing: error) }
+                do { if try box.start() { return }; throw CancellationError() }   // cancelled before it started: it never runs
+                catch { p.terminationHandler = nil; try? o.fileHandleForWriting.close(); try? e.fileHandleForWriting.close(); c.resume(throwing: error) }
             }
         } onCancel: { box.terminate() }
         let out = String(decoding: await outTask.value, as: UTF8.self), err = String(decoding: await errTask.value, as: UTF8.self)
-        if let log { try? (out + err).write(to: log, atomically: true, encoding: .utf8) }
+        if let log { try? (logFilter ?? { $0 })(out + err).write(to: log, atomically: true, encoding: .utf8) }
         return Result(code: code, out: out, err: err)
     }
-}
-private final class TerminateBox: @unchecked Sendable {
-    let p: Process
-    init(_ p: Process) { self.p = p }
-    func terminate() { if p.isRunning { p.terminate() } }
+
+    /// A short tool run with `input` on its standard input (a password, which then is never on a command line), in a session of its own: with no controlling
+    /// terminal, a tool that asks for a password reads it from its standard input, never from a terminal Beam was started from (posix_spawn, POSIX_SPAWN_SETSID)
+    static func run(_ exe: String, _ args: [String], input: Data) async throws -> Result {
+        try await Task.detached(priority: .utility) { () throws -> Result in
+            var i: [Int32] = [-1, -1], o: [Int32] = [-1, -1], e: [Int32] = [-1, -1]
+            guard pipe(&i) == 0, pipe(&o) == 0, pipe(&e) == 0 else { for f in i + o + e where f >= 0 { close(f) }; throw POSIXError(.EMFILE) }
+            var fa: posix_spawn_file_actions_t? = nil, attr: posix_spawnattr_t? = nil
+            posix_spawn_file_actions_init(&fa); posix_spawnattr_init(&attr)
+            defer { posix_spawn_file_actions_destroy(&fa); posix_spawnattr_destroy(&attr) }
+            posix_spawn_file_actions_adddup2(&fa, i[0], 0); posix_spawn_file_actions_adddup2(&fa, o[1], 1); posix_spawn_file_actions_adddup2(&fa, e[1], 2)
+            posix_spawnattr_setflags(&attr, Int16(POSIX_SPAWN_SETSID | POSIX_SPAWN_CLOEXEC_DEFAULT))   // a new session; no other descriptor of Beam's goes to the tool
+            let argv: [UnsafeMutablePointer<CChar>?] = ([exe] + args).map { strdup($0) } + [nil]
+            defer { for a in argv { free(a) } }
+            var pid: pid_t = 0
+            let st = posix_spawn(&pid, exe, &fa, &attr, argv, environ)
+            close(i[0]); close(o[1]); close(e[1])
+            guard st == 0 else { close(i[1]); close(o[0]); close(e[0]); throw POSIXError(POSIXErrorCode(rawValue: st) ?? .EIO) }
+            let out = FileHandle(fileDescriptor: o[0], closeOnDealloc: true), err = FileHandle(fileDescriptor: e[0], closeOnDealloc: true)
+            let errTask = Task.detached { err.readDataToEndOfFile() }
+            _ = fcntl(i[1], F_SETNOSIGPIPE, 1)   // a tool that exits before reading all of it: an error from write, never a SIGPIPE to Beam
+            let w = FileHandle(fileDescriptor: i[1], closeOnDealloc: true)
+            try? w.write(contentsOf: input); try? w.close()
+            let outData = out.readDataToEndOfFile()
+            var status: Int32 = 0
+            while waitpid(pid, &status, 0) < 0 && errno == EINTR {}
+            let code = (status & 0x7f) == 0 ? (status >> 8) & 0xff : 128 + (status & 0x7f)
+            return Result(code: code, out: String(decoding: outData, as: UTF8.self), err: String(decoding: await errTask.value, as: UTF8.self))
+        }.value
+    }
 }
 
 struct DeviceInfo: Identifiable, Sendable, Equatable, Hashable, Codable {

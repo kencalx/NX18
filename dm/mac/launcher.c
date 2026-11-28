@@ -85,6 +85,16 @@ static void mkdirs(const char *path) {   // mkdir -p
     mkdir(p, 0755);
 }
 
+// A path for the log: under the home folder as ~/..., so the Mac account's name stays out of logs a player shares (Share log, bug reports). One per log line
+static const char *logged_path(const char *path) {
+    static __thread char buf[PATH_MAX];
+    const char *home = getenv("HOME"); size_t n = home ? strlen(home) : 0;
+    while (n > 1 && home[n - 1] == '/') n--;
+    if (!path || !n || strncmp(path, home, n) || (path[n] && path[n] != '/')) return path ? path : "";
+    snprintf(buf, sizeof buf, "~%s", path + n);
+    return buf;
+}
+
 static void env_file(const char *path) {   // KEY=VALUE lines, # starts a comment; a variable already set stays
     FILE *f = fopen(path, "r"); if (!f) return;
     char ln[4096];
@@ -94,7 +104,7 @@ static void env_file(const char *path) {   // KEY=VALUE lines, # starts a commen
         char *eq = strchr(s, '=');
         if (*s == '#' || !eq || eq == s) continue;
         *eq = 0; char *k = s; for (char *t = eq - 1; t > k && (*t == ' ' || *t == '\t'); t--) *t = 0;
-        if (!getenv(k)) { setenv(k, eq + 1, 0); add_key(&g_file_keys, k); fprintf(stderr, "launcher: env %s=%s (%s)\n", k, env_private(k) ? "(set)" : eq + 1, path); }
+        if (!getenv(k)) { setenv(k, eq + 1, 0); add_key(&g_file_keys, k); fprintf(stderr, "launcher: env %s=%s (%s)\n", k, env_private(k) ? "(set)" : eq + 1, logged_path(path)); }
     }
     fclose(f);
 }
@@ -226,7 +236,7 @@ static void profile_env(void) {
 static void programs_table(const char *contents, const char *res, const char *sup) {
     char in[PATH_MAX], out[PATH_MAX]; snprintf(in, sizeof in, "%s/dm/programs.tsv", res); snprintf(out, sizeof out, "%s/programs.tsv", sup);
     FILE *f = fopen(in, "r"); if (!f) return;
-    FILE *o = fopen(out, "w"); if (!o) { fprintf(stderr, "[RED] launcher: cannot write %s\n", out); fclose(f); return; }
+    FILE *o = fopen(out, "w"); if (!o) { fprintf(stderr, "[RED] launcher: cannot write %s\n", logged_path(out)); fclose(f); return; }
     int c;
     while ((c = fgetc(f)) != EOF) {
         if (c != '@') { fputc(c, o); continue; }
@@ -244,7 +254,7 @@ static void programs_table(const char *contents, const char *res, const char *su
 // start (Finder, the Dock, open, a terminal) has all three open and is unchanged
 static void log_open(const char *log) {
     int err = dm_log_redirect(log, 0644, STDOUT_FILENO);
-    if (err) { fprintf(stderr, "[RED] launcher: %s cannot be written (%s): no log for this run\n", log, strerror(err)); return; }
+    if (err) { fprintf(stderr, "[RED] launcher: %s cannot be written (%s): no log for this run\n", logged_path(log), strerror(err)); return; }
     setvbuf(stdout, NULL, _IOLBF, 0);
 }
 
@@ -298,7 +308,7 @@ int main(int argc, char **argv) {
     mkdirs(save); mkdirs(temp); mkdirs(logs);
     rename(log, prev);
     log_open(log);
-    fprintf(stderr, "launcher: %s (%s), host %s\n", name, id, host);
+    fprintf(stderr, "launcher: %s (%s), host %s\n", name, id, logged_path(host));
     CFArrayRef rules = setting_rules();   // the settings the launch environment already set: the window shows them, fixed
     for (CFIndex i = 0; rules && i < CFArrayGetCount(rules); i++) { char env[128]; if (rule_env(CFArrayGetValueAtIndex(rules, i), env, sizeof env) && getenv(env)) add_key(&g_launch_keys, env); }
     snprintf(p, sizeof p, "%s/env.txt", sup); env_file(p);
@@ -337,13 +347,13 @@ int main(int argc, char **argv) {
     if (*lang) setenv("DM_LANG", lang, 0);
     setenv("DM_WINDOW", "1", 0); setenv("DM_AUDIO", "1", 0);
     programs_table(contents, res, sup);
-    if (chdir(sup)) { fprintf(stderr, "[RED] launcher: cannot enter %s\n", sup); return 1; }
+    if (chdir(sup)) { fprintf(stderr, "[RED] launcher: cannot enter %s\n", logged_path(sup)); return 1; }
     struct sigaction sa = {.sa_handler = forward};   // no SA_RESTART: waitpid below sees EINTR and waits again
     sigemptyset(&sa.sa_mask);
     sigaction(SIGTERM, &sa, NULL); sigaction(SIGINT, &sa, NULL); sigaction(SIGHUP, &sa, NULL);
     char *host_argv[] = {host, dm, NULL};
     int err = posix_spawn(&g_child, host, NULL, NULL, host_argv, environ);
-    if (err) { fprintf(stderr, "[RED] launcher: cannot start %s: %s\n", host, strerror(err)); return 1; }
+    if (err) { fprintf(stderr, "[RED] launcher: cannot start %s: %s\n", logged_path(host), strerror(err)); return 1; }
     int status;
     while (waitpid(g_child, &status, 0) < 0) if (errno != EINTR) return 1;
     // Cloud saves (DM_SAVE_SYNC, dm/host/save_sync.h): what the host committed and had not sent yet goes now, after a crash too (the committed save is whole whatever the host was doing)

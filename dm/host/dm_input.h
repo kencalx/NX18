@@ -53,6 +53,11 @@ void dm_motion_clear_joy(int pad, int side);
 enum { DM_JOYMOUSE_CONNECTED = 1u << 0, DM_JOYMOUSE_ON_SURFACE = 1u << 1 };
 void dm_joy_mouse(int pad, int side, int32_t dx, int32_t dy, uint32_t state);
 int dm_joy_mouse_wanted(void);   // 1 once the game has set up the mouse sensors or pointer (InitializeJcms / InitializeNmouse): a front end turns a Joy-Con's sensor on only then. Any thread
+// Whether the game wants six-axis samples (hle_hid.c): a sensor started (StartSixAxisSensor) and not stopped, or the npad IMU on (EnableNpadImu); a game that reads one before any
+// start wants it from that read until its first start. A front end runs its phone's motion sensors only then (DmGamepad.m, DM_MOTION_ON_DEMAND). Any thread. The hook (set once,
+// before the game runs) is called on the game's thread after each change, and must not block: it reads dm_six_axis_wanted again where it acts
+int dm_six_axis_wanted(void);
+void dm_six_axis_hook(void (*cb)(void));
 uint32_t dm_player_npad(int player);  // the npad id the game reads player p + 1 on: Handheld (0x20) or No1 (0) for player 1, No n (id n - 1) for player n
 // A library applet in front of the game (the offline web page, hle_web.c / web_apple.m): while held, the game reads no buttons and centred sticks on every npad, as an application
 // out of focus does, and presses made meanwhile are dropped when the hold ends. dm_input_peek reads what the applet sees: every path ORed (any controller drives it), each stick

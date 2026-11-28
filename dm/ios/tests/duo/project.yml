@@ -26,6 +26,7 @@ targets:
       - path: ../../Sources/NX18Profile.swift          # the NX 18 Profile: storage, the folder's stamp rules, dm_profile_env (§20.5)
       - path: ../../Sources/NX18ProfileFlow.swift      # the card's Profile flows: photo picker and crop, name bar, folder pick, the move (§20-§21)
       - path: ../../Sources/LauncherArt.swift
+      - path: ../../Sources/NX18Blur.swift              # the wash's blur on the CPU (no Core Image context before the game's Metal device)
       - path: ../../Sources/ArtFocus.swift              # the key art's framing (the Gate's Adjust art)
       - path: ../../Sources/PlayRecord.swift            # the play record and the battery estimate (gate-ui §18.2), on the device only
       - path: ../../Sources/GuideViewer.swift

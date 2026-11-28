@@ -64,13 +64,22 @@ static BOOL capture_to_folder(NSString *path, NSString *dir) {
     return ok;
 }
 
+// The notice's thumbnail decodes the whole PNG (about 20 ms of CPU for 1920 x 1080 on an M-series Mac, 36 ms for 2868 x 1320; ImageIO's thumbnail path costs the same, the PNG
+// decode is the cost) and the file may then move to the NX 18 folder: utility work, so it runs at QOS_CLASS_UTILITY, below the game's threads, as a recording's move does.
+// DM_CAPTURE_THUMB_QOS=0: QOS_CLASS_USER_INITIATED, as before
+static qos_class_t capture_thumb_qos(void) {
+    static int utility = -1;
+    if (utility < 0) { const char *e = getenv("DM_CAPTURE_THUMB_QOS"); utility = !e || atoi(e) != 0; }
+    return utility ? QOS_CLASS_UTILITY : QOS_CLASS_USER_INITIATED;
+}
+
 void dm_capture_screenshot(UIView *over) {
     __weak UIView *weak = over;
     BOOL asked = front_capture_screenshot(^(NSString *path, BOOL ok) {
         UIWindow *w = weak.window;
         if (!ok) { notice_show(w, nil, @"Couldn't save the screenshot"); return; }
         NSString *folder = dm_nx18_captures_shared() ? dm_nx18_folder_path(NULL) : nil;   // main thread: resolving it holds the folder's scope
-        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{   // a small picture for the notice, off the main thread
+        dispatch_async(dispatch_get_global_queue(capture_thumb_qos(), 0), ^{   // a small picture for the notice, off the main thread
             UIImage *thumb = [[UIImage imageWithContentsOfFile:path] imageByPreparingThumbnailOfSize:CGSizeMake(104, 60)];
             NSString *text = @"Screenshot saved";
             if (folder) text = capture_to_folder(path, folder) ? @"Screenshot saved to the NX 18 folder" : @"Screenshot saved here: the NX 18 folder can't be reached";

@@ -189,14 +189,35 @@ final class NX18Profile: ObservableObject {
         #endif
     }
 
+    // One look per start (DM_PROFILE_LOOK_ONCE, on by default; =0 looks again at startGame and lets a second read start while one is still running, as before): the Gate's Play
+    // looks (envForPlay) and startGame, moments later, takes the name and picture it left without looking again (two folder bookmark resolves and up to the budget again on the
+    // main thread before the first frame); a start that skipped the Gate, or one more than 5 minutes after Play looked (a question answered late), still looks there. And while
+    // a read that outlived its wait is still running, a look uses the local copy instead of starting another (they would race on lastSeen)
+    nonisolated static let lookOnce: Bool = { guard let e = getenv("DM_PROFILE_LOOK_ONCE") else { return true }; return atoi(e) != 0 }()
+    nonisolated(unsafe) static var lookedForPlayAt: CFAbsoluteTime = 0   // main thread: when the Gate's Play looked for this start (0: it did not)
+    nonisolated static let pullInFlight = OSAllocatedUnfairLock(initialState: false)
+    // The Gate's Play (Launcher.swift start): the look and the env, and startGame's dm_profile_env then skips the look
+    func envForPlay() {
+        lookAtFolder(); NX18Profile.applyEnv()
+        Self.lookedForPlayAt = Self.lookOnce ? CFAbsoluteTimeGetCurrent() : 0
+    }
+
     // At Gate open and at a start that skips it: a cheap look at the folder within the budget, never blocking past it; a timeout keeps the local copy
     func lookAtFolder(budget: TimeInterval = 1.0) {
         refreshFolderState()
         guard enabled, let folder = Self.folderURL() else { return }
         let local = self.local
+        let once = Self.lookOnce
+        if once, !Self.pullInFlight.withLock({ busy in if busy { return false }; busy = true; return true }) {
+            fputs("profile: the last look at the NX 18 folder is still reading; the copy on this device is used\n", stderr); return
+        }
         let done = DispatchSemaphore(value: 0)
         let pulled = OSAllocatedUnfairLock(initialState: false)   // written by the read, which may finish after a timeout: a lock, not a captured var (Swift 6)
-        DispatchQueue.global(qos: .userInitiated).async { let c = NX18ProfileSync.pull(local: local, folder: folder); pulled.withLock { $0 = c }; done.signal() }
+        DispatchQueue.global(qos: .userInitiated).async {
+            let c = NX18ProfileSync.pull(local: local, folder: folder); pulled.withLock { $0 = c }
+            if once { NX18Profile.pullInFlight.withLock { $0 = false } }
+            done.signal()
+        }
         if done.wait(timeout: .now() + budget) == .timedOut { fputs("profile: the NX 18 folder did not answer within \(budget) s; the copy on this device is used\n", stderr); return }
         if pulled.withLock({ $0 }) {
             reload(); pictureVersion += 1
@@ -351,7 +372,13 @@ enum NX18ProfilePicture {
 // The C entry for front_ios.m's start that skips the Gate (the look within its budget, then the env), and the Gate's Play
 @_cdecl("dm_profile_env")
 public func dm_profile_env() {
-    if Thread.isMainThread { MainActor.assumeIsolated { NX18Profile.shared.lookAtFolder() } }
+    if Thread.isMainThread {
+        MainActor.assumeIsolated {
+            let at = NX18Profile.lookedForPlayAt; NX18Profile.lookedForPlayAt = 0
+            if at > 0, CFAbsoluteTimeGetCurrent() - at < 300 { fputs("profile: the Gate's Play looked at the NX 18 folder for this start\n", stderr) }   // DM_PROFILE_LOOK_ONCE
+            else { NX18Profile.shared.lookAtFolder() }
+        }
+    }
     NX18Profile.applyEnv()
 }
 

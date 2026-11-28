@@ -10,10 +10,15 @@ The rows keep their order (the order of first use, which is the prepare step's o
 as the host leaves it out.
 Usage:
   pso_seed.py check (--game <id> | --map <shader_map.tsv>) [<list>...]       every row of the lists (default: the game's pso_manifest.tsv); exit 1 on a refused row
-  pso_seed.py add (--game <id> | --map <shader_map.tsv> --manifest <file>) [--note <text>]... [--drop-invalid] <recorded list>...
+  pso_seed.py add (--game <id> | --map <shader_map.tsv> --manifest <file>) [--note <text>]... [--drop-invalid] [--keep-s] <recorded list>...
       appends to the manifest the rows of the recorded lists it does not name yet, below its rows and the notes (one comment line each; {S} {R} {C} {M} {G} {rows} are the counts
-      of the rows added). The provisional profile's line "empty until recorded" goes. A refused row stops it (nothing written) unless --drop-invalid leaves those rows out"""
-import argparse, re, struct, sys
+      of the rows added). The provisional profile's line "empty until recorded" goes. A refused row stops it (nothing written) unless --drop-invalid leaves those rows out.
+      S rows of the recorded lists are skipped, not checked and not refused, and their number printed: the host ignores them (DM_PSO_DROP_S, on by default: nvn_mtl.m
+      drop_s_on), so an old device list or upstream capture still adds its other rows. --keep-s, or DM_PSO_DROP_S=0 in the environment, adds them as before
+  pso_seed.py strip-s (--game <id> | --manifest <file>)...
+      takes the S rows out of committed lists, comments and the other rows as they are, and refuses (writes nothing) a list whose game's shader-build digest (dmsh_chain.py
+      inputs: G and K rows only) or whose offline archive rows (pso_offline.py: C, M and R rows) the cut would change"""
+import argparse, os, re, struct, sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
@@ -23,6 +28,14 @@ STAGES = {'vertex': 0, 'pixel': 1, 'geometry': 2, 'hull': 3, 'task': 3, 'domain'
 KEY = re.compile(r'[0-9a-f]{16}_b\Z')   # a library's name: <map key>_b
 BORDER = DESC + 416   # pso_key.border, then border_spare
 PROVISIONAL = '# Provisional profile: empty until recorded'
+
+
+def drop_s_default():   # the host's DM_PSO_DROP_S: on unless =0
+    return os.environ.get('DM_PSO_DROP_S') != '0'
+
+
+def is_s(row):
+    return row.startswith('S\t')
 
 
 def read_map(path):
@@ -155,12 +168,16 @@ def report(bad, limit=10):
     if len(bad) > limit: print(f'  ... and {len(bad) - limit} more', file=sys.stderr)
 
 
-def add(manifest, sources, shmap, notes=(), drop_invalid=False):
+def add(manifest, sources, shmap, notes=(), drop_invalid=False, keep_s=None, skipped=None):
     """Appends to manifest the valid rows of sources it does not name yet (see the module's note). Returns (rows added, rows refused); writes nothing when a row is refused
-    and drop_invalid is off"""
+    and drop_invalid is off. keep_s: add S rows too (None: as DM_PSO_DROP_S says, on: skipped); skipped: a list the skipped S rows are appended to"""
+    if keep_s is None: keep_s = not drop_s_default()
     text = manifest.read_text(encoding='utf-8') if manifest.is_file() else ''
     known = {identity(r) for r in rows_of(text)}
     recorded = [r for src in sources for r in rows_of(Path(src).read_text(encoding='utf-8'))]
+    if not keep_s:
+        if skipped is not None: skipped.extend(r for r in recorded if is_s(r))
+        recorded = [r for r in recorded if not is_s(r)]
     new, bad = collect(recorded, shmap, known)
     if (bad and not drop_invalid) or not new: return new, bad
     n = counts(new)
@@ -170,17 +187,62 @@ def add(manifest, sources, shmap, notes=(), drop_invalid=False):
     return new, bad
 
 
+def strip_s(manifest, game=None):
+    """Takes the S rows out of manifest (comments, blank lines and the other rows stay where they are). game: the profile, whose shader-build digest (dmsh_chain.inputs) must
+    not change. Returns (S rows taken out, why it was refused or None); writes nothing when refused or when there is no S row"""
+    sys.path.insert(0, str(REPO / 'dm/gfx/tools'))
+    import dmsh_chain, pso_offline   # noqa: E402 (what reads the list besides the host: the shader build's digest and the archive made offline)
+    raw = manifest.read_bytes()
+    lines = raw.decode('utf-8').split('\n')
+    kept = [ln for ln in lines if not is_s(ln)]
+    n = len(lines) - len(kept)
+    if not n: return 0, None
+    out = '\n'.join(kept).encode('utf-8')
+    tmp = manifest.with_name(manifest.name + '.strip-s')
+    tmp.write_bytes(out)
+    try:
+        def same(read): return read([str(manifest)]) == read([str(tmp)])
+        if not (same(lambda ms: pso_offline.read_computes([], ms)) and same(pso_offline.read_meshes) and same(pso_offline.read_layouts)):
+            return n, 'the offline archive\'s rows (pso_offline.py) would change'
+        if game is not None:
+            before = dmsh_chain.inputs(game)
+            os.replace(tmp, manifest)
+            try: after = dmsh_chain.inputs(game)
+            except BaseException: manifest.write_bytes(raw); raise
+            if after != before:
+                manifest.write_bytes(raw)
+                return n, f'the shader-build digest would change ({before} to {after})'
+            return n, None
+        os.replace(tmp, manifest)
+        return n, None
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=(__doc__ or '').split('\n')[0])   # python3 -OO strips the docstring
-    ap.add_argument('action', choices=('check', 'add'))
+    ap.add_argument('action', choices=('check', 'add', 'strip-s'))
     ap.add_argument('lists', nargs='*', help='check: the lists to check (default: the game\'s pso_manifest.tsv); add: the recorded lists')
     ap.add_argument('--game', help='the profile under dm/games: its shader_map.tsv and pso_manifest.tsv')
     ap.add_argument('--map', help='the shader map (default: the game\'s)')
     ap.add_argument('--manifest', help='add: the seed list to append to (default: the game\'s)')
     ap.add_argument('--note', action='append', default=[], help='add: a comment line above the added rows; {S} {R} {C} {M} {G} {rows} are their counts')
     ap.add_argument('--drop-invalid', action='store_true', help='add: leave refused rows out instead of writing nothing')
+    ap.add_argument('--keep-s', action='store_true', help='add: add the recorded S rows too, as before DM_PSO_DROP_S (the default skips them; DM_PSO_DROP_S=0 keeps them too)')
     a = ap.parse_args(argv)
     gdir = REPO / 'dm/games' / a.game if a.game else None
+    if a.action == 'strip-s':
+        if not (a.game or a.manifest): ap.error('strip-s: --game or --manifest')
+        g = None
+        if a.game:
+            sys.path.insert(0, str(REPO / 'dm/games')); import game as game_mod   # noqa: E402
+            g = game_mod.load(a.game)
+        p = Path(a.manifest) if a.manifest else g.table('pso_manifest.tsv') if g is not None else None
+        if p is None: ap.error('strip-s: --game or --manifest')
+        n, why = strip_s(p, g)
+        if why: print(f'[RED] {p}: {n} S rows not taken out: {why}', file=sys.stderr); return 1
+        print(f'{p}: {n} S rows taken out' + (' (the shader-build digest and the offline archive\'s rows unchanged)' if g is not None else ' (the offline archive\'s rows unchanged)'))
+        return 0
     if a.map: shmap = read_map(a.map)
     elif gdir: shmap = read_map(gdir / 'shader_map.tsv')
     else: ap.error('--game or --map')
@@ -198,8 +260,10 @@ def main(argv=None):
     if not a.lists: ap.error('add: the recorded lists')
     manifest = Path(a.manifest) if a.manifest else gdir / 'pso_manifest.tsv' if gdir else None
     if not manifest: ap.error('add: --manifest, or --game')
-    new, bad = add(manifest, a.lists, shmap, a.note, a.drop_invalid)
+    skipped = []
+    new, bad = add(manifest, a.lists, shmap, a.note, a.drop_invalid, keep_s=True if a.keep_s else None, skipped=skipped)
     n = counts(new)
+    if skipped: print(f'{len(skipped)} S rows of the recorded lists skipped: the host ignores them (DM_PSO_DROP_S; --keep-s adds them)')
     if bad:
         print(f'[RED] {len(bad)} rows refused' + (', left out:' if a.drop_invalid else ': nothing written (--drop-invalid leaves them out)'), file=sys.stderr)
         report(bad)

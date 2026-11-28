@@ -10,11 +10,15 @@ extension Library {
     /// Marks the built games whose NX 18 changed (rebuilds). When Beam comes to the front (at most once a minute) and after each build (`force`). A build from before
     /// Beam recorded its checkout gets the commit HEAD was at its time, once, kept in the library
     func checkRebuilds(force: Bool = false) async {
-        if checkingRebuilds { return }
         if !force, let last = lastRebuildCheck, Date.now.timeIntervalSince(last) < 60 { return }
+        guard settings.checkout.isValid else { if !rebuilds.isEmpty { rebuilds = [:] }; return }
+        guard rebuildCheck.begin(force: force) else { return }   // one runs: a forced check (after a build) makes it go round once more, with that build in it
+        repeat { await checkRebuildsOnce() } while rebuildCheck.next()
+        lastRebuildCheck = .now
+    }
+    private func checkRebuildsOnce() async {
         let checkout = settings.checkout
         guard checkout.isValid else { if !rebuilds.isEmpty { rebuilds = [:] }; return }
-        checkingRebuilds = true; defer { checkingRebuilds = false; lastRebuildCheck = .now }
         let folder = checkout.folder
         let legacy = games.compactMap { g in g.lastBuild.flatMap { $0.ok && $0.nx18 == nil ? (g.id, $0.date) : nil } }
         if !legacy.isEmpty {
@@ -70,4 +74,21 @@ extension Library {
         }
     }
     func cancelTonight() { tonightTask?.cancel(); tonightTask = nil; tonight = nil }
+}
+
+/// One rebuild check at a time. A forced check asked for while one runs is not dropped: the running check goes round once more, since what it read may be from
+/// before the build that asked (a build ending during another's check), and the game would keep a stale "Update available" mark until the next one
+struct RebuildCheckGate: Sendable, Equatable {
+    private(set) var running = false
+    private var again = false
+    /// Whether the caller runs the check now; false when one runs already (a forced caller's check then runs once more after it)
+    mutating func begin(force: Bool) -> Bool {
+        if running { if force { again = true }; return false }
+        running = true; return true
+    }
+    /// After a pass: true when another is due, false when the check is over
+    mutating func next() -> Bool {
+        if again { again = false; return true }
+        running = false; return false
+    }
 }

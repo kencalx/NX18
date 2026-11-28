@@ -88,6 +88,9 @@ void dm_motion_set_switch(int player, const float acceleration[3], const float r
     (void)player; (void)acceleration; (void)rotation;
 }
 
+int dm_six_axis_wanted(void) { return 0; }   // the harness runs no game: the phone's motion sensors stay off (DmGamepad.m, motion on demand)
+void dm_six_axis_hook(void (*cb)(void)) { (void)cb; }
+
 void dm_motion_clear(int player) {
     if (player < 0 || player >= DM_PLAYERS) return;
     pthread_mutex_lock(&g_input_lock);

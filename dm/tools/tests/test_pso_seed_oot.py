@@ -38,18 +38,24 @@ class Committed(unittest.TestCase):
         rows = self.rows(self.lines)
         keep, bad = pso_seed.collect(rows, self.shmap)
         self.assertEqual((bad, len(keep)), ([], len(rows)))
-        self.assertEqual(pso_seed.counts(keep), {'S': 19607, 'R': 10822, 'C': 1770, 'M': 240, 'K': 36, 'rows': 32475})
-        self.assertEqual(len({pso_seed.identity(r) for r in rows}), 32475)
+        self.assertEqual(pso_seed.counts(keep), {'S': 19607, 'R': 11678, 'C': 1780, 'M': 285, 'K': 36, 'rows': 33386})
+        self.assertEqual(len({pso_seed.identity(r) for r in rows}), 33386)
         up = next(i for i, ln in enumerate(self.lines) if ln.startswith('# Added on 2026-11-27 from upstream NXNative dc8710ec5, 41c5c8328, 95a9510c6'))
         up2 = next(i for i, ln in enumerate(self.lines) if ln.startswith("# Added on 2026-11-27 from upstream NXNative's list at 1a54371cf"))   # the second check: upstream's rows since the first
         block = self.rows(self.lines[up:up2])   # upstream's three small captures; its five bulk captures are still left out (the README)
         self.assertEqual(pso_seed.counts(block), {'S': 47, 'R': 137, 'C': 3, 'M': 2, 'rows': 189})
         self.assertIn('189 rows (47 S, 137 R, 3 C), 2 M', self.lines[up])
         self.assertFalse({pso_seed.identity(r) for r in self.rows(self.lines[:up])} & {pso_seed.identity(r) for r in block})
-        block2 = self.rows(self.lines[up2:])
+        up3 = next(i for i, ln in enumerate(self.lines) if ln.startswith("# Added on 2026-11-28 from upstream NXNative's list at 7bc66e5a3"))   # the third check: upstream's rows since the second
+        block2 = self.rows(self.lines[up2:up3])
         self.assertEqual(pso_seed.counts(block2), {'S': 674, 'R': 1219, 'C': 197, 'M': 15, 'rows': 2105})
         self.assertIn('2090 rows (674 S, 1219 R, 197 C), 15 M', self.lines[up2])
         self.assertFalse({pso_seed.identity(r) for r in self.rows(self.lines[:up2])} & {pso_seed.identity(r) for r in block2}, 'the second check repeats none above it')
+        block3 = self.rows(self.lines[up3:])   # only rows new upstream since 1a54371cf (no S rows, 28d41fc9d); its border_spare rows refused
+        self.assertEqual(pso_seed.counts(block3), {'S': 0, 'R': 856, 'C': 10, 'M': 45, 'rows': 911})
+        self.assertIn('911 rows (0 S, 856 R, 10 C), 45 M', self.lines[up3])
+        for c in ('c79fb4d17', '4031aa56d', '045c179f1', '18a2480ac', '13105 refused rows'): self.assertIn(c, self.lines[up3])
+        self.assertFalse({pso_seed.identity(r) for r in self.rows(self.lines[:up3])} & {pso_seed.identity(r) for r in block3}, 'the third check repeats none above it')
 
     def test_test_build_4_block(self):
         above, block = self.rows(self.lines[:self.test4]), self.lines[self.test4 + 1:self.field]

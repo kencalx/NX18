@@ -73,6 +73,16 @@ final class PlayRecord {
     var url = PlayRecord.defaultURL
     private(set) var current: PlaySession?
     private var lastLevel: Double?, lastAt: Date?, unplugged = false
+    // The battery level (percent) and whether the phone is unplugged, nil when unknown: UIDevice on the phone (monitoring on), a stand-in in play_record_check.swift
+    var batteryReading: @MainActor () -> (level: Double, onBattery: Bool)? = {
+        #if canImport(UIKit)
+        let dev = UIDevice.current
+        guard dev.isBatteryMonitoringEnabled, dev.batteryLevel >= 0 else { return nil }
+        return (Double(dev.batteryLevel) * 100, dev.batteryState == .unplugged)
+        #else
+        return nil
+        #endif
+    }
     private var timer: Timer?
     private var observers: [NSObjectProtocol] = []
 
@@ -94,6 +104,7 @@ final class PlayRecord {
     func begin(preset: String, autoScaling: Bool, now: Date = Date()) {
         if current != nil { return }
         current = PlaySession(start: now, end: now, minutes: 0, preset: preset, autoScaling: autoScaling, thermal: ProcessInfo.processInfo.thermalState.rawValue)
+        lastLevel = nil; lastAt = nil; unplugged = false   // the time away (lock screen, another app) is not battery play: the first sample only starts the count
         sampleBattery(now)
         #if canImport(UIKit)
         if observers.isEmpty {
@@ -117,7 +128,14 @@ final class PlayRecord {
         current = nil
         s.end = now; s.minutes = now.timeIntervalSince(s.start) / 60
         var r = Self.read(url)
+        Self.dropCheckpoint(of: s, from: &r)   // a checkpoint of this session already in the record is replaced, not counted again
         if s.minutes >= 1 { r.add(s); write(r) }
+    }
+    // The previous checkpoint of this session (the record's last entry with the same start), taken out with its minutes and its session count
+    nonisolated static func dropCheckpoint(of s: PlaySession, from r: inout PlayRecordData) {
+        if let last = r.sessions.last, last.start == s.start {
+            r.sessions.removeLast(); r.totalMinutes -= last.minutes; r.totalSessions -= 1
+        }
     }
     // Every 5 minutes: the session so far is written as the record's last one, replaced on the next checkpoint
     func checkpoint(now: Date = Date()) {
@@ -126,23 +144,18 @@ final class PlayRecord {
         guard var s = current else { return }
         s.end = now; s.minutes = now.timeIntervalSince(s.start) / 60
         var r = Self.read(url)
-        if let last = r.sessions.last, last.start == s.start {   // the previous checkpoint of this session
-            r.sessions.removeLast(); r.totalMinutes -= last.minutes; r.totalSessions -= 1
-        }
+        Self.dropCheckpoint(of: s, from: &r)
         if s.minutes >= 1 { r.add(s); write(r) }
     }
     private func sampleBattery(_ now: Date) {
-        #if canImport(UIKit)
-        let dev = UIDevice.current
-        guard dev.isBatteryMonitoringEnabled, dev.batteryLevel >= 0 else { lastLevel = nil; return }
-        let level = Double(dev.batteryLevel) * 100, onBattery = dev.batteryState == .unplugged
+        guard let b = batteryReading() else { lastLevel = nil; return }
+        let level = b.level, onBattery = b.onBattery
         if var s = current, let l0 = lastLevel, let t0 = lastAt, unplugged {
             s.batteryMinutes += now.timeIntervalSince(t0) / 60
             s.batteryUsed += Swift.max(0, l0 - level)
             current = s
         }
         lastLevel = level; lastAt = now; unplugged = onBattery
-        #endif
     }
 }
 

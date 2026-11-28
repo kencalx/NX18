@@ -342,6 +342,61 @@ static int service_request_start(int calls) {
     printf("%s: started worker with %d service requests: starter held to its end %d, worker saw the flag %d, flag afterwards %d\n", ok ? "PASS" : "FAIL", calls, held, seen, busy);
     return ok;
 }
+// A request from a thread in no handoff returns without G (DM_FS_HAND_PEEK): with G held by another thread for 100 ms it returns at once, and with the peek off (the negative
+// control: the old path) it waits for G. A thread in a handoff still leaves it. A peer dropping the thread's handoff entries under G (thr_free's shrink) while the thread makes
+// requests: every request either leaves the handoff under G or sees 0 (TSan: tsan-threads runs this test)
+static _Atomic int peek_hold_go, peek_hold_up;
+static void *peek_hold(void *arg) {
+    (void)arg; g_lock(); atomic_store(&peek_hold_up, 1);
+    while (!atomic_load(&peek_hold_go)) usleep(100);
+    usleep(100000); g_unlock(); return NULL;
+}
+static uint64_t peek_request_us(int peek) {
+    g_fs_peek = peek; atomic_store(&peek_hold_go, 0); atomic_store(&peek_hold_up, 0);
+    pthread_t h; assert(!pthread_create(&h, NULL, peek_hold, NULL));
+    while (!atomic_load(&peek_hold_up)) usleep(100);
+    atomic_store(&peek_hold_go, 1);
+    uint64_t t0 = now_ns(); dm_thread_service_request(); uint64_t us = (now_ns() - t0) / 1000;
+    pthread_join(h, NULL); g_fs_peek = 1;
+    return us;
+}
+static thr_t peek_waker;
+static _Atomic int peek_stop;
+static void *peek_shrink(void *arg) {   // thr_free's drop of a freed waker's entries, over and over
+    thr_t *me = arg;
+    while (!atomic_load(&peek_stop)) {
+        g_lock();
+        for (int i = 0; i < me->nhand; ) if (me->hand[i].by == &peek_waker) { me->hand[i] = me->hand[me->nhand - 1]; __atomic_store_n(&me->nhand, me->nhand - 1, __ATOMIC_RELAXED); } else i++;
+        g_unlock();
+        sched_yield();
+    }
+    return NULL;
+}
+static int service_request_peek(void) {
+    thr_t *me = pthread_getspecific(g_keythr); assert(me);
+    g_lock(); me->nhand = 0; g_unlock();
+    uint64_t fast = peek_request_us(1), slow = peek_request_us(0);
+    int ok = fast < 50000 && slow >= 80000;
+    printf("%s: service request in no handoff with G held 100 ms elsewhere: %llu us with the peek, %llu us without (the old path waits for G)\n", ok ? "PASS" : "FAIL", (unsigned long long)fast, (unsigned long long)slow);
+    // in a handoff: the request still leaves it
+    memset(&peek_waker, 0, sizeof peek_waker);
+    g_lock(); me->hand[0].by = &peek_waker; me->hand[0].epoch = 0; me->nhand = 1; me->start_by = NULL; g_unlock();
+    dm_thread_service_request();
+    g_lock(); int left = me->nhand == 0; g_unlock();
+    printf("%s: service request in a handoff leaves it\n", left ? "PASS" : "FAIL");
+    // a peer lowering nhand under G while the thread makes requests
+    atomic_store(&peek_stop, 0);
+    pthread_t sh; assert(!pthread_create(&sh, NULL, peek_shrink, me));
+    int rounds = 0;
+    for (int i = 0; i < 20000; i++) {
+        g_lock(); me->hand[0].by = &peek_waker; me->hand[0].epoch = 0; me->nhand = 1; g_unlock();
+        dm_thread_service_request();
+        g_lock(); rounds += me->nhand == 0; g_unlock();
+    }
+    atomic_store(&peek_stop, 1); pthread_join(sh, NULL);
+    printf("%s: requests with a peer dropping handoff entries: %d of 20000 ended out of the handoff\n", rounds == 20000 ? "PASS" : "FAIL", rounds);
+    return ok && left && rounds == 20000;
+}
 int main(int argc, char **argv) {
     (void)argv;
     alarm(10);
@@ -352,6 +407,7 @@ int main(int argc, char **argv) {
     int ok = 1;
     ok &= native_wait_handoff();
     ok &= native_join_handoff();
+    ok &= service_request_peek();
     ok &= service_request_start(0);
     for (int i = 0; i < 20; i++) ok &= service_request_start(1 + i % 2);
     if (argc == 1) for (int kind = 0; kind <= 3; kind++) ok &= handoff_scope(kind);   // with every runnable peer checked (core_preempt), the busy peer holds the signaller by design

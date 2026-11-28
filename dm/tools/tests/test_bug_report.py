@@ -197,6 +197,31 @@ class BugReport(unittest.TestCase):
         n = {i for i in self.names(out) if i.startswith('crash/')}
         self.assertEqual(n, {'crash/dmhost-0.ips', 'crash/dmhost-1.ips', 'crash/dmhost-2.ips'})
 
+    def test_crash_ids_scrubbed(self):
+        # synthetic lines in the shapes of an .ips file (a JSON header line, then the pretty-printed body) and of an older .crash file's header
+        key, sess, inc = 'EB3A2F4F-2F51-4C1D-9C47-0D7E5A1B2C3D', '7C1E0B9A-8F2D-4E3B-A6C5-1D2E3F4A5B6C', '1F2E3D4C-5B6A-4978-8695-A4B3C2D1E0F9'
+        machine = 'c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00'
+        boot = '2A3B4C5D-6E7F-4081-92A3-B4C5D6E7F809'   # bootSessionUUID: one per boot, in every .ips of that boot (macOS 27's reports carry it)
+        ips = (f'{{"app_name":"dmhost","timestamp":"2026-11-28 06:00:00.00 -0800","bug_type":"309","os_version":"macOS 27.2","incident_id":"{inc}","name":"dmhost"}}\n'
+               f'{{\n  "uptime" : 9000,\n  "procPath" : "{self.home}/Games/x/dmhost",\n  "incident" : "{inc}",\n  "crashReporterKey" : "{key}",\n'
+               f'  "sessionID" : "{sess}",\n  "bootSessionUUID" : "{boot}",\n  "sleepWakeUUID" : "{sess}",\n  "deviceIdentifierForVendor" : "{sess}",\n'
+               f'  "usedImages" : [{{"uuid" : "0a1b2c3d-0000-1111-2222-333344445555", "name" : "dmhost"}}],\n  "exception" : {{"type" : "EXC_BAD_ACCESS"}}\n}}\n')
+        crash = (f'Incident Identifier: {inc}\nCrashReporter Key:   {machine}\nAnonymous UUID:       {sess}\nSleep/Wake UUID:       {sess}\n'
+                 f'Process:               dmhost [123]\nException Type:  EXC_BAD_ACCESS (SIGSEGV)\n')
+        d = self.home / 'Library/Logs/DiagnosticReports'
+        (d / 'dmhost-a.ips').write_text(ips); (d / 'dmhost-b.crash').write_text(crash)
+        code, out = self.run_main(TID)
+        z = zipfile.ZipFile(out)
+        a, b = z.read('crash/dmhost-a.ips').decode(), z.read('crash/dmhost-b.crash').decode()
+        for t in (a, b):
+            for v in (key, sess, inc, machine, boot): self.assertNotIn(v, t)
+        self.assertIn('"crashReporterKey" : "(removed)"', a); self.assertIn('"incident_id":"(removed)"', a); self.assertIn('"sessionID" : "(removed)"', a); self.assertIn('"bootSessionUUID" : "(removed)"', a)
+        self.assertIn('"uuid" : "0a1b2c3d-0000-1111-2222-333344445555"', a)   # binary images' UUIDs stay: symbolication needs them
+        self.assertIn('"procPath" : "~/Games/x/dmhost"', a); self.assertIn('EXC_BAD_ACCESS', a)
+        self.assertIn('Incident Identifier: (removed)\nCrashReporter Key:   (removed)\n', b); self.assertIn('Process:               dmhost [123]', b)
+        self.assertNotIn('key-like', '\n'.join(n for n in z.read('report.md').decode().splitlines() if 'dmhost-b.crash' in n))   # scrubbed, not dropped as key material
+        self.assertEqual(br.scrub_crash_ids('a log line with "incident" in it\n'), 'a log line with "incident" in it\n')
+
     def test_exit_codes(self):
         self.assertEqual(self.run_main('/nonexistent/thing')[0], 2)
         self.assertEqual(self.run_main(str(self.root))[0], 2)
