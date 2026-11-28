@@ -101,7 +101,21 @@ final class DuoGameMenuPanelTests: XCTestCase {
         XCTAssertEqual(rows.last?.title, "Share log")
         XCTAssertEqual(model.focus, "row:DM_PICTURE_FIT", "No presets in this list: the controller's ring starts on the first quick tile")
         XCTAssertEqual(model.home.tiles.map(\.id), ["row:DM_PICTURE_FIT", "row:DM_SHOW_FPS", "layout"], "The first page's quick tiles, in the Gate's order (gate-ui §19.2)")
-        XCTAssertEqual(model.home.doors.map(\.id), ["door.more"], "No Customize without other live rows; More holds Gate at start and Share log")
+        XCTAssertEqual(model.home.doors.map(\.id), ["door.more"], "No Customize without other live rows; More holds Exit and return to Gate and Share log")
+
+        // Exit and return to Gate asks first: its page holds the question, the ring starts on Keep Playing, and Keep Playing and B go back without exiting
+        let exit = try XCTUnwrap(rows.first { $0.id == GameMenuExit.rowID })
+        model.activate(exit)
+        XCTAssertEqual(model.page.title, "Exit the game?")
+        XCTAssertEqual(model.page.subtitle, "Progress since your last save is lost.")
+        XCTAssertEqual(model.focus, GameMenuExit.noID, "Keep Playing has the focus")
+        model.activate(try XCTUnwrap(model.page.sections.flatMap(\.items).first { $0.id == GameMenuExit.noID }))   // Keep Playing
+        XCTAssertNil(model.page.id, "Back to the rows")
+        XCTAssertEqual(model.focus, GameMenuExit.rowID)
+        model.activate(exit)
+        model.handle(.b)
+        XCTAssertNil(model.page.id, "B goes back too")
+        XCTAssertTrue(dm_game_panel_shown(), "Nothing exited")
 
         // A switch: takes effect, and the panel stays
         let fps = try XCTUnwrap(rows.first { $0.id == "row:DM_SHOW_FPS" })

@@ -76,8 +76,8 @@ struct DevicesSection: View {
                 Text(daysText(r)).font(.callout).foregroundStyle(r.renewDue() ? NX18Palette.coral : .secondary)
             }
             Spacer()
-            if r.renewDue() { Button("Renew") { library.renew(r) }.buttonStyle(.glassProminent).disabled(library.jobs[gameID]?.isActive ?? false) }
             Button("Open on Device") { library.launch(r) }.buttonStyle(.glass)
+            if r.renewDue() { Button("Renew") { library.renew(r) }.buttonStyle(.glassProminent).disabled(library.jobs[gameID]?.isActive ?? false) }   // the preferred action last, at the trailing edge
         }
     }
     private func daysText(_ r: InstallRecord) -> String {
@@ -110,7 +110,7 @@ private struct SlotsStrip: View {
     let device: DeviceInfo
     var body: some View {
         let used = Slots.used(onDevice: library.deviceApps[device.id] ?? [])
-        HStack(spacing: 8) {
+        GlassEffectContainer(spacing: 8) { HStack(spacing: 8) {   // the slots as one glass group over the page's art (beam-design §4.5)
             Text("Slots on \(device.name)").font(.callout).foregroundStyle(.secondary)
             ForEach(used, id: \.bundleID) { a in
                 let rec = library.installs.first { $0.bundleID == a.bundleID && $0.deviceID == device.id }
@@ -120,14 +120,18 @@ private struct SlotsStrip: View {
                     Text(rec?.daysLeft().map { "\($0) d" } ?? "other tool").font(.caption2).foregroundStyle(.secondary)
                 }
                 .padding(.horizontal, 8).padding(.vertical, 4)
-                .background(RoundedRectangle(cornerRadius: 8).fill(NX18Palette.charcoal))
+                .nx18Surface(RoundedRectangle(cornerRadius: 8, style: .continuous), fill: NX18Palette.charcoal, hairline: GateColor.hairline, art: true)
                 .frame(maxWidth: 150)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("Used by \(title)")
+                .accessibilityValue(rec?.daysLeft().map { "\($0) day\($0 == 1 ? "" : "s") left" } ?? "Installed by another tool")
             }
             ForEach(0..<max(Slots.freeLimit - used.count, 0), id: \.self) { _ in
                 Text("Free").font(.caption).foregroundStyle(.secondary)
                     .padding(.horizontal, 12).padding(.vertical, 8)
                     .background(RoundedRectangle(cornerRadius: 8).strokeBorder(NX18Palette.separator, style: StrokeStyle(lineWidth: 1, dash: [4])))
+                    .accessibilityLabel("Free slot")
             }
-        }
+        } }
     }
 }

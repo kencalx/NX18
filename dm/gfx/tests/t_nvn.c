@@ -1679,6 +1679,94 @@ int main(void) {
             P(nvnQueueFinalize)(&q2);
             free(qmem2);
         }
+        // 6a2. The deferred acquire (DM_NVN_ACQ_DEFER; upstream c17a54984's cases, hand-ported, and NX 18's): armed by the CPU waits on acquire syncs above, an acquire with a
+        // sync returns at once and its waits are the sync's
+        {
+            win_t *wo = (win_t *)&win; int ia = -1, ib = -1, ic = -1;
+            EXPECT("deferral armed by the CPU waits on acquire syncs above", 1, atomic_load(&g_acq_armed));
+            P(nvnQueueFinish)(&q);
+            // (1) Super Mario Bros. Wonder – Nintendo Switch 2 Edition's order: its present thread presents the acquired image (here behind an event not yet signalled) before
+            // the game's CPU nvnSyncWait on the acquire's sync: the wait is for the image's previous present only, so it returns
+            ev_mem[0] = 0;
+            P(nvnWindowAcquireTexture)(&win, &s_acq, &ia);
+            EXPECT("the acquire's sync holds the deferred wait (fenced 4)", 4, ((sync_t *)&s_acq)->fenced);
+            P(nvnCommandBufferBeginRecording)(&cb);
+            P(nvnCommandBufferWaitEvent)(&cb, &ev, NVN_EVENT_WAIT_MODE_EQUAL, 1);
+            NVNcommandHandle h_ev = P(nvnCommandBufferEndRecording)(&cb);
+            P(nvnQueueSubmitCommands)(&q, 1, &h_ev);
+            P(nvnQueuePresentTexture)(&q, &win, ia);
+            NVNsyncWaitResult r = P(nvnSyncWait)(&s_acq, 5000000000ull);
+            EXPECT("Wonder's order: the sync wait after the image's own new present (held) does not wait for it", 1, r == NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED || r == NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED);
+            P(nvnEventSignal)(&ev, NVN_EVENT_SIGNAL_MODE_WRITE, 1);
+            P(nvnQueueFinish)(&q);
+            // (2) The game acquires the next image before the present after the last one's last present is made (Wonder's present thread behind): that present, made later
+            // while the wait has not run, becomes the image's next present, and the sync waits for its GPU end (the acquire's sync when it waited itself)
+            P(nvnWindowAcquireTexture)(&win, &s_acq, &ib); P(nvnSyncWait)(&s_acq, UINT64_MAX);   // image B, not presented yet
+            P(nvnWindowAcquireTexture)(&win, &s_acq, &ic);   // image A again: its last present (in (1)) has no present after it
+            acq_defer_t *aw = wo->pending_acq;
+            EXPECT("image A again", ia, ic);
+            EXPECT("its next present is not known yet (want_next)", 1, aw && aw->want_next && !aw->nx);
+            ev_mem[0] = 0;
+            P(nvnCommandBufferBeginRecording)(&cb);
+            P(nvnCommandBufferWaitEvent)(&cb, &ev, NVN_EVENT_WAIT_MODE_EQUAL, 1);
+            h_ev = P(nvnCommandBufferEndRecording)(&cb);
+            P(nvnQueueSubmitCommands)(&q, 1, &h_ev);
+            P(nvnQueuePresentTexture)(&q, &win, ib);   // held behind the event
+            EXPECT("B's present becomes A's next present", 1, aw && aw == wo->pending_acq && aw->nx && !aw->want_next);
+            EXPECT("the sync waits for that present's GPU end: expires while it is held", NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED, P(nvnSyncWait)(&s_acq, 200000000ull));
+            P(nvnEventSignal)(&ev, NVN_EVENT_SIGNAL_MODE_WRITE, 1);
+            r = P(nvnSyncWait)(&s_acq, 5000000000ull);
+            EXPECT("and is signalled once it has run", 1, r == NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED || r == NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED);
+            P(nvnQueuePresentTexture)(&q, &win, ic);
+            P(nvnQueueFinish)(&q);
+            // (3) A queue wait only (nvnQueueWaitSync, and a command buffer's WaitSync at its submit), no CPU wait: the queue passes, and the window's next acquire runs the wait
+            uint64_t dr = g_acq_drained;
+            P(nvnWindowAcquireTexture)(&win, &s_acq, &ia);
+            P(nvnQueueWaitSync)(&q, &s_acq);
+            P(nvnCommandBufferBeginRecording)(&cb);
+            P(nvnCommandBufferWaitSync)(&cb, &s_acq);
+            h_ev = P(nvnCommandBufferEndRecording)(&cb);
+            P(nvnQueueSubmitCommands)(&q, 1, &h_ev);
+            P(nvnQueuePresentTexture)(&q, &win, ia);
+            P(nvnQueueFinish)(&q);
+            EXPECT("queue waits on a deferred acquire's sync pass", 1, 1);
+            P(nvnWindowAcquireTexture)(&win, &s_acq, &ib);
+            EXPECT("the next acquire runs the wait no CPU wait took", 1, (long long)(g_acq_drained - dr));
+            // (4) The sync fenced again while its acquire is pending: it waits as the new fence; the window still runs the acquire's wait at its next acquire
+            P(nvnQueueFenceSync)(&q, &s_acq, NVN_SYNC_CONDITION_ALL_GPU_COMMANDS_COMPLETE, 0);
+            r = P(nvnSyncWait)(&s_acq, UINT64_MAX);
+            EXPECT("a deferred acquire's sync fenced again waits as the new fence", 1, r == NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED || r == NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED);
+            EXPECT("the window keeps the acquire", 1, wo->pending_acq != NULL);
+            P(nvnQueuePresentTexture)(&q, &win, ib);
+            dr = g_acq_drained;
+            P(nvnWindowAcquireTexture)(&win, NULL, &ic);
+            EXPECT("a null-sync acquire runs it first and waits itself (no deferral)", 1, (long long)(g_acq_drained - dr) == 1 && !wo->pending_acq);
+            P(nvnQueuePresentTexture)(&q, &win, ic);
+            P(nvnQueueFinish)(&q);
+            // (5) The window finalized with an acquire pending: the sync is signalled without a wait
+            NVNwindow w5; EXPECT("second window initializes", 1, P(nvnWindowInitialize)(&w5, &wb));
+            int i5 = -1;
+            P(nvnWindowAcquireTexture)(&w5, &s_acq, &i5);
+            P(nvnWindowFinalize)(&w5);
+            EXPECT("finalized with an acquire pending: its sync is signalled", NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED, P(nvnSyncWait)(&s_acq, 0));
+            // (6) No present after the image's last one (here: never presented), and the game submits its frame before its CPU wait (Wonder's order): the sync is the commits at
+            // the acquire, not those at the wait, which would make the game wait for the GPU to finish the frame it has just submitted (every frame with DM_NVN_ACQ_NEXT=0)
+            NVNwindow w6; EXPECT("third window initializes", 1, P(nvnWindowInitialize)(&w6, &wb));
+            int i6 = -1;
+            P(nvnWindowAcquireTexture)(&w6, &s_acq, &i6);
+            acq_defer_t *a6 = ((win_t *)&w6)->pending_acq;
+            EXPECT("a never-presented image defers with no present to wait for", 1, a6 && !a6->tk && !a6->nx && !a6->want_next);
+            if (a6) {
+                acq_defer_ref(a6); uint64_t gf6 = a6->gf;
+                P(nvnCommandBufferBeginRecording)(&cb); P(nvnCommandBufferBarrier)(&cb, 0); NVNcommandHandle h6 = P(nvnCommandBufferEndRecording)(&cb);
+                P(nvnQueueSubmitCommands)(&q, 1, &h6); P(nvnQueueFinish)(&q);
+                EXPECT("the frame's submission committed past the acquire's commits", 1, mtl_last_fence() > gf6);
+                P(nvnSyncWait)(&s_acq, UINT64_MAX);
+                EXPECT("the wait after the game's submission keeps the acquire's commits", (long long)gf6, (long long)a6->gf);
+                acq_defer_unref(a6);
+            }
+            P(nvnWindowFinalize)(&w6);
+        }
         P(nvnSyncFinalize)(&s_acq);
         P(nvnEventFinalize)(&ev);
         P(nvnMemoryPoolFinalize)(&ep);

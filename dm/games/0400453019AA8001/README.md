@@ -26,6 +26,16 @@ legally owned and acquired copy).
   others through the compute path, which records them for the next build.
 - `MountRom` with this program's own index (1, `romo:`) mounts its RomFS without
   the red line ([Mounting the current program's RomFS by index](../../../docs/reference/services.md#mounting-the-current-programs-romfs-by-index)).
+- The shader split reads this game's shaders (2026-11-27). Before, it stopped with
+  `[RED] main#SLCT@0x18a01a0 HCPS: truncated control`: `main`'s shader programs have NVN2
+  (Switch 2) control sections, which are shorter than the Maxwell ones NX 18's Monolith
+  reader expected, and the reader did not open the RomFS's ARH2 archive indexes
+  (`sts.arh`, `stso.arh`), whose shaders would have been left out. Both are read now, as
+  upstream reads them (NXNative `b32d0bf3b`; [Monolith's shader containers](../../../docs/reference/shaders.md#monolith-arh1-xbc1-and-hcpsslct-shader-containers)).
+  The other Monolith games' splits are unchanged. Not yet checked against the game's files:
+  the next build's split should find upstream's 24,815 keys (this profile's `shader_map.tsv`).
+  The `skipped` lines in `rewrite_main.log` and `rewrite_sdk.log` are function patches that do not
+  apply to this build and are expected.
 
 ## Current status
 

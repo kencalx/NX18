@@ -62,7 +62,7 @@ _Static_assert(__builtin_offsetof(samp_t, p) == 8 && sizeof(samp_par) == 40, "sa
 // The per-stage shader keys are not kept in prog_t: the game's real NVNprogram may be smaller than the header's 0xC0 (growing prog_t corrupted the adjacent object in Mario); see prog_keys in hle_nvn.c
 typedef struct { uint32_t magic, nstage; NVNshaderData sd[6]; uint64_t serial; } prog_t;     FITS(prog_t, NVNprogram);   // serial: table key for the replay layer's resolved result
 
-typedef struct { uint32_t magic, fenced; uint64_t fence; } sync_t;   /* fenced 1: physical, 2: acquire, 3: owned logical receipt */                           FITS(sync_t, NVNsync);
+typedef struct { uint32_t magic, fenced; uint64_t fence; } sync_t;   /* fenced 1: physical, 2: acquire, 3: owned logical receipt, 4: a deferred acquire (hle_nvn.c acq_defer_t) */ FITS(sync_t, NVNsync);
 typedef struct { const pool_t *pool; int64_t off; } ev_builder_t;                             FITS(ev_builder_t, NVNeventBuilder);
 typedef struct { uint32_t magic; volatile uint32_t *val; const pool_t *pool; int64_t off; } ev_t; FITS(ev_t, NVNevent);   // pool / off: EventGetMemoryPool / Offset
 
@@ -70,7 +70,7 @@ typedef struct { uint32_t magic; volatile uint32_t *val; const pool_t *pool; int
 typedef struct { NVNdevice *dev; void *native; int32_t ntex, interval; NVNtexture *tex[4]; int32_t nactive; } win_builder_t;
 FITS(win_builder_t, NVNwindowBuilder);
 // avail[i]: time at which swapchain image i can be acquired again (ns, monotonic clock) = its display time + one present period; pace: target time of this window's present pacer
-typedef struct { uint32_t magic; void *native; int32_t ntex, interval, next, crop[4]; NVNtexture *tex[4]; uint64_t presents, avail[4], pace, ticket[4], next_ticket[4]; int32_t nactive, follow, last_pres; } win_t;   // ticket[i]: ticket of the most recent present of image i; next_ticket[i]: ticket of the first present after it (Horizon hands image i back once that present has run; DM_NVN_ACQ_NEXT); last_pres: idx + 1 of the most recent present (0: none); nactive as in win_builder_t; follow: see nvn_pace_follow
+typedef struct { uint32_t magic; void *native; int32_t ntex, interval, next, crop[4]; NVNtexture *tex[4]; uint64_t presents, avail[4], pace, ticket[4], next_ticket[4]; int32_t nactive, follow, last_pres; void *pending_acq; } win_t;   // pending_acq: the deferred acquire whose wait has not been taken over yet (hle_nvn.c acq_defer_t, under g_win_tk_mu); ticket[i]: ticket of the most recent present of image i; next_ticket[i]: ticket of the first present after it (Horizon hands image i back once that present has run; DM_NVN_ACQ_NEXT); last_pres: idx + 1 of the most recent present (0: none); nactive as in win_builder_t; follow: see nvn_pace_follow
 FITS(win_t, NVNwindow);
 
 // Command buffer: commands are written into the command memory given by the game (AddCommandMemory), and the list that strings a recording's pieces together into its control memory

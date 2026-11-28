@@ -241,3 +241,4 @@ const uint8_t *duo_harness_touch_atlas(int *w, int *h, uint32_t *gen) { if (w) *
 // The GPU-lost path front_ios.m now links (front_gpu_lost): the harness never loses its GPU
 int mtl_gpu_lost_why(void) { return 0; }
 void dm_host_shutdown(const char *why) { (void)why; }
+void dm_gfx_quit_begin(void) {}   // Exit and return to Gate (front_ios.m dm_exit_to_gate): no pipeline archive in the harness

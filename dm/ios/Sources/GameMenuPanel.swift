@@ -1,16 +1,24 @@
 // The in-game menu as NX 18's own panel (the default; DM_GAME_MENU=system keeps the UIMenu, DmGamepad.m). The same rows as the UIMenu (GameMenu.swift gameMenuSections), drawn so
 // they keep out of the game's way: a wide, low panel of see-through charcoal over a light dim (no blur), the rows in columns side by side (the settings screen's sections, More),
-// cyan for switches, ticks and the controller's focus, coral only for Close, the text in NX 18's UI font (NXFont.swift). Landscape: below the menu button at the top centre, as
-// wide as the screen allows; portrait: across the bottom, fewer columns, scrolling when it is taller than the room it has. A choice, Cheats and Touch controls open as a page of
-// the panel (‹ back; a choice on the Touch controls page opens a page over it, and B goes back one page at a time). The game keeps running, as under the UIMenu; the touch
+// cyan for switches, ticks and the controller's focus, coral only for Close and Exit to Gate, the text in NX 18's UI font (NXFont.swift). Landscape: below the menu button at the top centre, as
+// wide as the screen allows; portrait: across the bottom, fewer columns, scrolling when it is taller than the room it has. A choice, Cheats, Touch controls and Exit and return to Gate's
+// confirmation open as a page of the panel (‹ back; a choice on the Touch controls page opens a page over it, and B goes back one page at a time). The game keeps running, as under the UIMenu; the touch
 // controls and the controllers' input to the game wait while it is open (DmGamepad.m), and nothing pressed to close it reaches the game.
 //   Touch: a tap on a row picks it, on the dim (the menu button too) closes. A controller (LauncherController.swift's polling, while the panel is open only): the D-pad or the left
 //   stick moves the cyan ring, A picks, B goes back a page or closes, + closes; Home opens and closes it (DmGamepad.m). VoiceOver: a modal of buttons with their values and notes,
 //   the escape gesture goes back or closes. Dynamic Type: the system's text size (the window keeps the UIMenu's one small size, front_ios.m), up to accessibility 3: fewer,
 //   wider columns. Share log closes the panel first: the share sheet and its alert are the system's
+// The Mac's game app draws the same panel over its game view (dm/mac/GameMenuMac.swift: an NSHostingView, scaled to the window): its controller events come from the host's
+// own pad reading (front_mac.m), its keyboard's too, and the mouse clicks as touch taps
 import GameController
 import SwiftUI
+#if os(iOS)
 import UIKit
+typealias GameMenuPad = LauncherGamepad   // LauncherController.swift: polled only while the panel is up
+#else
+import AppKit
+typealias GameMenuPad = GameMenuMacPad    // dm/mac/GameMenuMac.swift: fed by front_mac.m, no polling
+#endif
 
 // One column of a page: blocks of rows, each under its heading (none where a section goes on from the column before)
 struct GameMenuColumn: Identifiable {
@@ -30,7 +38,7 @@ enum GameMenuLayout {
     static func presetColumns(_ count: Int) -> Int { count == 3 ? 3 : 2 }
 
     static func columns(_ sections: [GameMenuSection], fit n: Int, split: Int) -> [GameMenuColumn] {
-        var merged: [GameMenuSection] = []   // neighbours under one heading (More: Cheats, then Settings screen at start and Share log) are one block
+        var merged: [GameMenuSection] = []   // neighbours under one heading (More: Cheats, then Take Screenshot, Exit and return to Gate and Share log) are one block
         for s in sections where !s.items.isEmpty {
             if let last = merged.last, let h = s.heading, last.heading == h, s.title.isEmpty, last.title.isEmpty { merged[merged.count - 1].items += s.items } else { merged.append(s) }
         }
@@ -97,6 +105,13 @@ enum GameMenuLayout {
         return dx > 0 ? line.first : line.last
     }
 
+    // The first page's doors in lines (gate-ui §19.2): up to three on one line; four (Customize, Cheats, Manual & documents, More) two by two, so each keeps a readable width
+    static func doorLines<T>(_ doors: [T]) -> [[T]] {
+        guard doors.count > 3 else { return doors.isEmpty ? [] : [doors] }
+        let lines = (doors.count + 2) / 3, per = (doors.count + lines - 1) / lines
+        return stride(from: 0, to: doors.count, by: per).map { Array(doors[$0..<Swift.min($0 + per, doors.count)]) }
+    }
+
     // The controller's step from id in columns: up / down in its column (no wrap), left / right to the next column at the same row, or the column's last row
     static func step(_ id: String?, _ dx: Int, _ dy: Int, in columns: [GameMenuColumn]) -> String? {
         let grid = columns.map(\.ids).filter { !$0.isEmpty }
@@ -122,14 +137,22 @@ enum GameMenuLayout {
     @Published var focus: String?
     @Published var anchorBottom: CGFloat = 0            // the menu button's lower edge in the panel's view: the landscape panel starts below it (GameMenuPanelHost keeps it, rotation too)
     let title = gameMenuTitle()
-    weak var anchor: UIView?                            // the menu button
+    weak var anchor: GameMenuAnchor?                    // the menu button; the game's view on the Mac
     var closed = false                                  // closing: the controller's presses during the fade do nothing
     @Published var leaving = false                      // closing: the panel leaves (its rim dematerializes, the content fades), then the host goes
     var columnsShown: [GameMenuColumn] = []            // the page as last laid out: the controller's steps go by it
     var close: () -> Void = {}
+    // Manual & documents (GameDocumentsViewer.swift): the document open in the viewer over the panel, and what the controller does to it. The pad's state for the viewer's hints
+    @Published private(set) var document: GameDocumentOpen?
+    let documentControl = GameDocumentControl()
+    @Published var padConnected = false
+    @Published var padGlyphs = NXPadGlyphs()
+    static weak var current: GameMenuPanelModel?   // the panel up: a document's row opens its viewer here (gameDocumentOpen); the documents' listing refreshes its rows
 
-    init(anchor: UIView?) {
+    init(anchor: GameMenuAnchor?) {
         self.anchor = anchor
+        Self.current = self
+        GameDocumentsStore.shared.changed = { GameMenuPanelModel.current?.refresh() }
         refresh()
         // where the controller's ring starts (drawn only while a controller is connected): the chosen preset's chip, else the first tile
         if let m = launcher, m.hasPresets { focus = "preset:" + (m.activePreset ?? m.basePreset).rawValue } else { focus = home.tiles.first?.id ?? root.first?.items.first?.id }
@@ -152,6 +175,7 @@ enum GameMenuLayout {
         guard let id = stack.last, let item = find(id) else { return Page(id: nil, title: title, subtitle: nil, sections: root, options: false) }
         switch item.kind {
         case .choice(let o): return Page(id: id, title: item.title, subtitle: item.subtitle, sections: [GameMenuSection(id: id + ".options", items: o)], options: true)
+        case .submenu(let s) where id == GameMenuExit.rowID: return Page(id: id, title: GameMenuExit.question, subtitle: GameMenuExit.warning, sections: s, options: false)   // the confirmation
         case .submenu(let s): return Page(id: id, title: item.title, subtitle: item.subtitle, sections: s, options: false)
         default: return Page(id: nil, title: title, subtitle: nil, sections: root, options: false)
         }
@@ -165,7 +189,12 @@ enum GameMenuLayout {
             stack.append(item.id); focus = (o.first(where: \.isOn) ?? o.first)?.id
         case .submenu(let s):
             stack.append(item.id); focus = s.first?.items.first?.id
+            if item.id == GameMenuExit.rowID {   // Exit and return to Gate asks first: the ring on Keep Playing, so A pressed on through does not exit
+                focus = GameMenuExit.noID
+                AccessibilityNotification.Announcement("\(GameMenuExit.question) \(GameMenuExit.warning)").post()
+            }
         case .action, .toggle:
+            if item.id == GameMenuExit.noID { back(); return }   // Keep Playing: back to the row, nothing done
             if item.closesMenu { close(); item.perform?(anchor); return }
             let option = page.options
             if item.id.hasPrefix("row:"), toast != nil { toastTask?.cancel(); toast = nil; launcher?.dropUndo() }   // a hand change ends the preset step's Undo: X then goes back to the base
@@ -179,6 +208,7 @@ enum GameMenuLayout {
         }
     }
     func back() {
+        if document != nil { closeDocument(); return }
         guard let last = stack.popLast() else { close(); return }
         focus = last
     }
@@ -210,8 +240,48 @@ enum GameMenuLayout {
     }
     var canUndo: Bool { toast != nil && launcher?.undoState != nil }
 
+    // A document in the viewer over the panel (the game runs on, its input still held): fetched first when iCloud holds it (GameDocuments.fetch), then shown. direct: from the UIMenu
+    func openDocument(_ d: GameDocument, direct: Bool = false) {
+        guard !closed else { return }
+        documentControl.take()
+        document = GameDocumentOpen(doc: d, direct: direct || (document?.direct ?? false))
+        fputs("documents: open \(d.kind.rawValue) (\(d.source.rawValue)\(d.downloading ? ", from iCloud" : ""))\n", stderr)
+        Task { @MainActor [weak self] in
+            let url = await GameDocuments.fetch(d)
+            guard let self, self.document?.doc.id == d.id else { return }
+            self.document?.url = url
+            self.document?.failed = url == nil
+            if url == nil { fputs("[RED] documents: it could not be read\n", stderr) }
+            else if d.downloading { GameDocumentsStore.shared.refresh() }   // it is on the device now: its row says so at the next listing
+        }
+    }
+    // B: back to the list, its row ringed; from the UIMenu the panel closes as well
+    func closeDocument() {
+        guard let open = document else { return }
+        documentControl.take()
+        document = nil
+        if open.direct { close(); return }
+        focus = "doc:" + open.doc.id
+    }
+    // ZL / ZR and the header's arrows: the document before or after in the list
+    func stepDocument(_ step: Int) {
+        guard let open = document, let next = GameDocuments.step(from: open.doc.id, by: step, in: GameDocumentsStore.shared.docs) else { return }
+        openDocument(next)
+    }
+
     func handle(_ e: LauncherPadEvent) {
         if closed { return }
+        if document != nil {   // the viewer has the controller: the document's own moves, then B back to the list, + closes, ZL / ZR the other documents
+            if documentControl.handle(e) { return }
+            switch e {
+            case .b: closeDocument()
+            case .plus: close()
+            case .zl: stepDocument(-1)
+            case .zr: stepDocument(1)
+            default: break
+            }
+            return
+        }
         switch e {   // the chooser's buttons act on every page (L / R only inside the menu: the game has no controllers while it is open)
         case .l: stepPreset(-1); return
         case .r: stepPreset(1); return
@@ -256,7 +326,7 @@ enum GameMenuLayout {
 
 struct GameMenuPanelView: View {
     @ObservedObject var model: GameMenuPanelModel
-    @StateObject private var pad = LauncherGamepad()
+    @StateObject private var pad = GameMenuPad()
     @Environment(\.dynamicTypeSize) private var typeSize
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.colorScheme) private var scheme
@@ -280,7 +350,7 @@ struct GameMenuPanelView: View {
                     .contentShape(Rectangle())
                     .onTapGesture { model.close() }
                     .accessibilityHidden(true)
-                if !model.leaving {
+                if !model.leaving && model.document == nil {
                     panel(width: width, maxHeight: maxHeight, landscape: landscape)
                         .padding(.top, landscape ? top : 0)
                         .padding(.bottom, landscape ? 0 : 10)
@@ -289,11 +359,21 @@ struct GameMenuPanelView: View {
             }
             .frame(width: geo.size.width, height: geo.size.height)
         }
+        #if os(iOS)
+        .overlay { if let open = model.document, !model.leaving { GameDocumentViewer(model: model, control: model.documentControl, open: open).transition(.opacity) } }   // the Mac's is unscaled (GameMenuMac.swift)
+        #endif
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.15), value: model.document?.doc.id)
+        .onChange(of: pad.connected, initial: true) { _, c in if model.padConnected != c { model.padConnected = c } }   // the viewer's hints
+        .onChange(of: pad.glyphs, initial: true) { _, g in if model.padGlyphs != g { model.padGlyphs = g } }
         .environment(\.gateRing, ringSpace)
         .dynamicTypeSize(...DynamicTypeSize.accessibility3)
         .nxTextRoot()
         .task { await pad.run { model.handle($0) } }   // only while the panel is up: the task ends with it
+        #if os(iOS)
         .onReceive(NotificationCenter.default.publisher(for: .DmVitalsTick)) { _ in vitalsTick &+= 1 }
+        #else
+        .onReceive(Timer.publish(every: 20, on: .main, in: .common).autoconnect()) { _ in vitalsTick &+= 1 }   // the save minute only (no Vitals on the Mac yet); while the panel is up
+        #endif
         .onAppear {   // the content's 160 ms fade and 6 pt slide; under Reduce Motion a jump in dark, a fade with no slide in light (a grey slab never pops on over a dark game)
             if reduceMotion && scheme == .dark { shown = true } else { withAnimation(.easeOut(duration: 0.16)) { shown = true } }
         }
@@ -378,7 +458,9 @@ struct GameMenuPanelView: View {
                     .layoutPriority(0)
             }
             Spacer(minLength: 8)
+            #if os(iOS)
             if !typeSize.isAccessibilitySize { VitalsCompactLine(tick: vitalsTick).layoutPriority(1) }   // never cut by the left line; at accessibility sizes it moves to its own line below
+            #endif
             Button { model.close() } label: {
                 Label("Close", systemImage: "xmark")
                     .labelStyle(.iconOnly)
@@ -394,7 +476,9 @@ struct GameMenuPanelView: View {
         .padding(.leading, page.id != nil ? 6 : 18)
         .padding(.trailing, 6)
         .padding(.top, 6)
+        #if os(iOS)
         if typeSize.isAccessibilitySize { VitalsCompactLine(tick: vitalsTick).padding(.horizontal, 18).padding(.bottom, 4) }   // the Vitals line's own line at accessibility sizes (gate-ui §19.2)
+        #endif
     }
 
     // MARK: The first page (gate-ui §19.2): the chooser on the left, the tiles and doors on the right; one column in portrait and at accessibility sizes
@@ -409,7 +493,7 @@ struct GameMenuPanelView: View {
         }
         let tiles = model.home.tiles.map(\.id)
         var right = stride(from: 0, to: tiles.count, by: 3).map { Array(tiles[$0..<min($0 + 3, tiles.count)]) }
-        right.append(model.home.doors.map(\.id))
+        right += GameMenuLayout.doorLines(model.home.doors.map(\.id))
         return zoned ? [chooser, right] : [chooser + right]
     }
 
@@ -492,8 +576,8 @@ struct GameMenuPanelView: View {
             LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 3), spacing: 8) {
                 ForEach(model.home.tiles) { item in tile(item) }
             }
-            HStack(spacing: 8) {
-                ForEach(model.home.doors) { item in door(item) }
+            ForEach(Array(GameMenuLayout.doorLines(model.home.doors).enumerated()), id: \.offset) { _, line in
+                HStack(spacing: 8) { ForEach(line) { item in door(item) } }
             }
         }
     }
@@ -510,7 +594,7 @@ struct GameMenuPanelView: View {
         return Button { model.focus = item.id; model.activate(item) } label: {
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 6) {
-                    NX18Icon(kind: key == "layout" ? .console : NX18Icon.forTile(key), size: 16).foregroundStyle(greyed ? MenuColor.muted : MenuColor.line)
+                    NX18Icon(kind: key == "layout" ? .console : key == "DM_FULLSCREEN" ? .picture : NX18Icon.forTile(key), size: 16).foregroundStyle(greyed ? MenuColor.muted : MenuColor.line)
                     if let lamp { MenuLamp(on: lamp) }
                     if let value { Text(value).nxFont(.footnote, weight: .semibold).foregroundStyle(greyed ? MenuColor.muted : MenuColor.line).lineLimit(1).minimumScaleFactor(0.6) }
                 }
@@ -671,7 +755,7 @@ private struct GameMenuRowView: View {
         Button(action: pick) {
             HStack(spacing: 6) {
                 if let s = item.symbol {
-                    Image(systemName: s).font(.footnote.weight(.medium)).foregroundStyle(MenuColor.line).frame(minWidth: 16)   // system: symbol
+                    Image(systemName: s).font(.footnote.weight(.medium)).foregroundStyle(coral ? MenuColor.second : MenuColor.line).frame(minWidth: 16)   // system: symbol
                 }
                 if overview, opens, !item.summary {   // the dot takes no room
                     Text(item.title).nxFont(.footnote).foregroundStyle(MenuColor.text).fixedSize(horizontal: false, vertical: true)
@@ -680,7 +764,7 @@ private struct GameMenuRowView: View {
                         }
                 } else {
                     VStack(alignment: .leading, spacing: NXFont.name == nil ? 1 : 3) {   // the UI font's lines carry no gap of their own (NXFont.swift)
-                        Text(item.title).nxFont(.footnote).foregroundStyle(MenuColor.text).fixedSize(horizontal: false, vertical: true)
+                        Text(item.title).nxFont(.footnote, weight: coral ? .semibold : .regular).foregroundStyle(coral ? MenuColor.second : MenuColor.text).fixedSize(horizontal: false, vertical: true)
                         if let s = item.subtitle, !s.isEmpty {
                             Text(s).nxFont(.caption2).foregroundStyle(MenuColor.muted).fixedSize(horizontal: false, vertical: true)
                         }
@@ -703,6 +787,7 @@ private struct GameMenuRowView: View {
         .accessibilityAddTraits(traits)
     }
 
+    private var coral: Bool { item.id == GameMenuExit.yesID }   // Exit to Gate: the second accent (coral in the dark set), as the Gate's Reset all settings
     private var opens: Bool { switch item.kind { case .choice, .submenu: return true; default: return false } }   // a page of its own, where its note is shown
     private var dot: Bool { if case .choice = item.kind { return !(item.subtitle ?? "").isEmpty }; return false }   // a submenu's note is its value
 
@@ -749,6 +834,7 @@ private struct GameMenuRowView: View {
     }
 }
 
+#if os(iOS)
 // The panel over the game: a child of the game's view controller, its view over the touch controls; opened and closed with a short fade (and a small slide without Reduce Motion)
 @MainActor final class GameMenuPanelHost: UIHostingController<GameMenuPanelView> {
     let model: GameMenuPanelModel
@@ -856,6 +942,7 @@ public func dmGamePanelClose() { MainActor.assumeIsolated { gameMenuPanelClose()
 
 @_cdecl("dm_game_panel_shown")
 public func dmGamePanelShown() -> Bool { MainActor.assumeIsolated { gameMenuPanel != nil } }
+#endif
 
 // The in-game menu's header, left (gate-ui §19.8): "Menu · Game Title · Saved 2 min ago". The save part drops first, then the title truncates; the Vitals line beside it never cuts.
 // The time is the game's own last save commit (hle_fs.c dm_fs_last_commit_ns), read when the menu opens and again on each 1 s tick the Vitals line already uses
@@ -887,6 +974,7 @@ struct GameMenuHeaderLine: View {
     }
 }
 
+#if os(iOS)
 // The compact Vitals line in the header (vitals.md §2, §7): "60 fps · 🌡 Warm · ▮82% · 9:41", shown even with Vitals off. The time drops first, then the heat word; the frame rate and
 // the battery stay. 🌡 and ▮ are the thermometer and battery symbols (cyan, coral when hot; yellow battery in Low Power Mode is iOS's own cue and stays for Vitals over the game)
 struct VitalsCompactLine: View {
@@ -921,3 +1009,4 @@ struct VitalsCompactLine: View {
     }
     static func tint(_ ch: Character) -> Color { ch == "🌡" ? (dm_vitals_thermal() >= 2 ? MenuColor.second : MenuColor.line) : MenuColor.text }
 }
+#endif

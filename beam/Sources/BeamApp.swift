@@ -42,11 +42,24 @@ import SwiftUI
                     .keyboardShortcut("o")
                 Button("Bring Your NX Play Library…") { NotificationCenter.default.post(name: .beamImportNXPlay, object: nil) }
                     .disabled(NXPlayLibrary.find() == nil)
+                Divider()
+                if library.rebuildTask != nil {
+                    Button("Stop Rebuilding Updated Games") { library.stopRebuilding() }
+                } else {
+                    Button("Rebuild Updated Games") { library.rebuildUpdated() }.disabled(library.rebuildCandidates.isEmpty)
+                }
+                if library.tonight != nil {
+                    Button("Cancel Tonight's Rebuild") { library.cancelTonight() }
+                } else {
+                    Button("Rebuild Updated Games Tonight") { library.rebuildTonight() }.disabled(library.rebuildTask != nil)   // once, at 1 AM: whatever NX 18 changed by then
+                }
             }
             CommandGroup(after: .windowArrangement) { OpenWindowButton(title: "Storage", id: "storage") }
             CommandGroup(after: .toolbar) {
                 Button(library.showingHome ? "Show Library" : "Beam Home") { library.showingHome.toggle() }   // one window: the library and Beam Home switch in place
                     .keyboardShortcut("h", modifiers: [.command, .control])
+                Button("Renew All") { library.renewAll() }   // the iPhone and iPad installs within 2 days of expiry, on the devices connected now
+                    .disabled(!library.renewDue() || library.renewingAll)
             }
         }
         Window("Storage", id: "storage") {

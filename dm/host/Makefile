@@ -77,6 +77,20 @@ FORCE:
 HOST_CFLAGS = $(CFLAGS) -I../gfx/nvn/include -I$(dir $(MSL_H)) -I$(dir $(GAME_H)) -I$(VPX) -I$(DAV1D)/include -I../third_party/stb_vorbis -fobjc-arc
 HOST_FRAMEWORKS = -framework Cocoa -framework WebKit -framework UserNotifications -framework QuartzCore -framework CoreText -framework Metal -framework MetalFX -framework GameController -framework CoreBluetooth -framework IOBluetooth -framework CoreHaptics -framework IOKit -framework AudioToolbox -framework CoreAudio -framework CoreFoundation -framework VideoToolbox -framework CoreMedia -framework CoreVideo -framework ImageIO -framework UniformTypeIdentifiers -framework StateReporting -framework MetricKit
 HOST_SRC = $(SRC) $(GFX)
+# The in-game menu (dm/mac/GameMenuMac.swift: the iPhone's panel over the game window, front_mac.m opens it): one Swift object for every game (no profile header in it), compiled
+# whole-module with the iOS menu's rows and panel and the launcher's model they need, and linked into the host with the system's Swift runtime. The C it calls is in the bridging header
+MENU_SWIFT = ../mac/GameMenuMac.swift $(addprefix ../ios/Sources/,GameMenu.swift GameMenuPanel.swift LauncherSettings.swift LauncherRow.swift LauncherPanel.swift LauncherFocus.swift \
+             NXFont.swift NX18Look.swift NX18Glass.swift NXButtonGlyph.swift NXButtonGlyphData.swift GameDocuments.swift \
+             GameDocumentsViewer.swift LauncherGuideFiles.swift)
+MENU_H = ../mac/GameMenuMac-Bridging.h ../ios/Sources/DmGameMenu.h game_menu_input.h dm_input.h
+MENU_OBJ = gen/menu/game_menu.o
+MENU_SDK := $(shell xcrun --show-sdk-path 2>/dev/null)
+MENU_LIBS = -L$(MENU_SDK)/usr/lib/swift -framework SwiftUI -framework Combine -framework PDFKit   # PDFKit: Manual & documents' PDFs (GameDocumentsViewer.swift)
+$(MENU_OBJ): $(MENU_SWIFT) $(MENU_H) Makefile ../mac/min_os.mk
+	@mkdir -p $(dir $@)
+	xcrun swiftc -c -wmo -O -g -swift-version 6 -parse-as-library -sdk $(MENU_SDK) -target arm64-apple-macos$(MACOS_MIN) -module-name DmGameMenu -module-cache-path gen/menu/cache -import-objc-header ../mac/GameMenuMac-Bridging.h -o $@ $(MENU_SWIFT)
+.PHONY: game_menu
+game_menu: $(MENU_OBJ)
 ifneq ($(filter ../%,$(filter-out ../gfx/%,$(HOST_SRC))),)
 $(error host sources outside dm/host and dm/gfx need an object rule: $(filter ../%,$(filter-out ../gfx/%,$(HOST_SRC))))
 endif
@@ -89,8 +103,8 @@ $(OBJ_DIR)/host/%.o: % Makefile ../mac/min_os.mk | $(GAME_H) $(MSL_H)
 $(OBJ_DIR)/gfx/%.o: ../gfx/% Makefile ../mac/min_os.mk | $(GAME_H) $(MSL_H)
 	@mkdir -p $(dir $@)
 	clang $(HOST_CFLAGS) -MMD -MP -c $< -o $@
-$(HOST_BIN): $(HOST_OBJ) $(VPX_LIB) $(DAV1D_LIB) Makefile ../mac/min_os.mk
-	clang $(HOST_CFLAGS) -o $@ $(HOST_OBJ) $(VPX_LIB) $(DAV1D_LIB) $(HOST_FRAMEWORKS)
+$(HOST_BIN): $(HOST_OBJ) $(MENU_OBJ) $(VPX_LIB) $(DAV1D_LIB) Makefile ../mac/min_os.mk
+	clang $(HOST_CFLAGS) -o $@ $(HOST_OBJ) $(MENU_OBJ) $(VPX_LIB) $(DAV1D_LIB) $(HOST_FRAMEWORKS) $(MENU_LIBS)
 	dsymutil $@
 ifneq ($(strip $(GAME)),)
 -include $(HOST_OBJ:.o=.d)

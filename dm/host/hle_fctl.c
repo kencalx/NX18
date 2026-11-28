@@ -27,7 +27,7 @@ int dm_thermal_now(void);    // hle_nvn.c's weak default (-1, the Mac); the iOS 
 int dm_low_power_now(void);  // Low Power Mode (iOS front end); off on the Mac
 __attribute__((weak)) uint64_t mtl_gpu_probe_last(double *ratio) { (void)ratio; return 0; }   // nvn_mtl.m: the latest GPU probe against the session's fastest and the count; none here
 __attribute__((weak)) void nvn_gpu_time_scale_refresh(void) {}   // hle_nvn.c: the GPU time scale follows the mode (hold30: the true times)
-__attribute__((weak)) int front_env_copy(const char *name, char *out, size_t cap) { const char *e = getenv(name); if (cap) snprintf(out, cap, "%s", e ? e : ""); return e != NULL; }   // front_ios.m: under the menu's lock
+__attribute__((weak)) int front_env_copy(const char *name, char *out, size_t cap) { const char *e = getenv(name); if (cap) snprintf(out, cap, "%s", e ? e : ""); return e != NULL; }   // front_ios.m, front_mac.m: under the menu's lock
 
 #define FCTL_LINES 80   // event lines in a run (four a probe: its start, its return, how it ended, its numbers); the rest are counted in the summary lines
 static nvn_fctl g_fc;     // the game's thread that runs the controller only

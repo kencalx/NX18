@@ -159,6 +159,7 @@ int front_web_touch(void);   // web_apple.m: an offline HTML page is shown over 
 - (void)menuClosed;
 - (void)menuOpenNow;
 - (void)panelToggle;
+- (void)panelOpenAlways;
 @end
 // The menu button: a UIButton that opens the in-game menu: with DM_GAME_MENU=system its menu is the UIMenu (UIKit draws it and takes the touches while it is open), else a tap
 // opens or closes NX 18's panel (panelToggle). Its hit circle is larger than the drawn one, and a key nearer
@@ -360,6 +361,9 @@ static BOOL assistive_running(void) { return UIAccessibilityIsVoiceOverRunning()
     else dm_gamepad_panel_closed();
 }
 - (void)panelToggle { if (dm_game_panel_shown()) dm_game_panel_close(); else [self panelOpen]; }
+// A document picked in DM_GAME_MENU=system's UIMenu (GameDocumentsViewer.swift gameDocumentOpen): its viewer is NX 18's panel's, so the panel opens for it, holding the controllers as
+// it always does, whichever menu the button has
+- (void)panelOpenAlways { BOOL system = _systemMenu; _systemMenu = NO; [self panelOpen]; _systemMenu = system; }
 - (int)padLayout { return _tap ? 2 : _full ? 1 : 0; }
 - (int)touchHidden { return _padOff ? 1 : _tap ? 2 : 0; }   // dm_gamepad_touch_hidden
 - (void)setPadLayout:(int)l {   // the in-game menu's pick: release every touch first (no key stays held), save, lay out again
@@ -1333,6 +1337,7 @@ void dm_gamepad_touch_look(const char *env, const char *value) {   // front_ios.
     LOG("front end: touch control %s %.2f (in-game menu)", size ? "size" : "opacity", v);
 }
 double dm_gamepad_size(void) { return g_touch_size; }   // front_ios.m: the frame-rate counter sits in the top row by the same units
+bool dm_gamepad_panel_open_now(void) { if (g_view) [g_view panelOpenAlways]; return dm_game_panel_shown(); }   // main thread (GameDocumentsViewer.swift)
 void dm_gamepad_menu_open(void) { if (g_view) [g_view menuOpenNow]; else LOG("front end: no touch controls yet: the in-game menu cannot open"); }   // main thread (LauncherShortcuts.swift)
 void dm_gamepad_hint(void) { [g_view menuShow]; }   // main thread: the menu button shows for 5 s (front_ios.m: the game's first picture, the end of the progress screen)
 int dm_pad_layout(void) { return g_view ? [g_view padLayout] : 0; }

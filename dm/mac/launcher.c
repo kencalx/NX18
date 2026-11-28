@@ -39,6 +39,7 @@ int dm_mac_launcher(void);   // Launcher.swift: 1 = Play (the settings are in th
 char *dm_mac_metal4_missing(int assume_missing);   // Launcher.swift: why this Mac cannot draw the game (no Metal 4), or NULL
 void dm_mac_forget_retired(void);    // Launcher.swift: drops the saved choices of switches the host no longer has (launcher.DM_PSO_MTL4)
 void dm_mac_preset_env(void);        // Launcher.swift: DM_PRESET, the preset the saved choices make, for a start without the window (frame generation's Battery Saver)
+int dm_mac_first_sync(void);         // Launcher.swift: a game's first sync through this folder waits for iCloud (MacFirstSync.swift); 1 = start, 0 = the player quit. A no-op once Play or the check without the window ran it
 static pid_t g_child;
 static char *g_file_keys, *g_launch_keys;   // the variables the env files set, and the settings the launch environment set (DM_ENV_FILE_KEYS, DM_ENV_LAUNCH_KEYS)
 
@@ -145,25 +146,71 @@ static void saved_choices(void) {   // after the env files, before the bundle's 
     }
 }
 
-// Cloud saves: the folder chosen in the settings window (Launcher.swift CloudSavesSection, cloudSaves.folder in the app's preferences) becomes DM_SAVE_SYNC
-// (dm/host/save_sync.h), with or without the window; a DM_SAVE_SYNC the launch environment or an env file set wins. A front end may write the key too (docs/frontends.md, The cloud saves folder)
-static void cloud_saves_folder(void) {
-    CFStringRef domain = CFBundleGetIdentifier(CFBundleGetMainBundle());
-    if (getenv("DM_SAVE_SYNC") || !domain) return;
-    CFPropertyListRef v = CFPreferencesCopyAppValue(CFSTR("cloudSaves.folder"), domain); char s[PATH_MAX];
-    if (v && CFGetTypeID(v) == CFStringGetTypeID() && CFStringGetCString(v, s, sizeof s, kCFStringEncodingUTF8) && *s) {
-        setenv("DM_SAVE_SYNC", s, 1); fprintf(stderr, "launcher: cloud saves through %s\n", s);
-    }
+static int pref_string(CFStringRef domain, CFStringRef key, char *out, size_t n) {   // a string in this app's preferences; "" when there is none or it does not fit
+    CFPropertyListRef v = CFPreferencesCopyAppValue(key, domain); out[0] = 0;
+    int ok = v && CFGetTypeID(v) == CFStringGetTypeID() && CFStringGetCString(v, out, (CFIndex)n, kCFStringEncodingUTF8);
+    if (!ok) out[0] = 0;
     if (v) CFRelease(v);
+    return ok && *out;
+}
+static int profile_on(CFStringRef domain) {   // nx18.profile in this app's preferences (the NX 18 card's Profile and NX 18 folder switch): on unless turned off
+    int on = 1;
+    CFPropertyListRef v = domain ? CFPreferencesCopyAppValue(CFSTR("nx18.profile"), domain) : NULL;
+    if (v && CFGetTypeID(v) == CFBooleanGetTypeID()) on = CFBooleanGetValue(v);
+    if (v) CFRelease(v);
+    return on;
+}
+
+// Cloud saves (dm/host/save_sync.h): the folder DM_SAVE_SYNC names. Two places, as on the iPhone (dm/ios/Sources/CloudSaves.m, dm_cloud_saves_env): this game's own folder
+// (cloudSaves.folder in the app's preferences, chosen on the Gate's Cloud saves page, Launcher.swift) or the Mac's NX 18 folder (nxnative/nx18-folder, one line, written by the
+// NX 18 card and NX 18 Beam). The NX 18 card's This game's saves (nx18.cloud = "shared" or "own") chooses between them; with no choice yet, a game with no own folder uses the
+// NX 18 folder when one is connected and there. Either way the folder is passed as it is, so the save lives at <folder>/<title ID>/save.dmsync on every device (cloud_path).
+// The default only with the Profile and NX 18 folder switch on (nx18.profile), and only for a game with no cloudSaves.folder at all (one turned off keeps "" there and stays off). NX18CloudSaves.decide (dm/ios/Sources/NX18Profile.swift) is the same rule for NX 18 Beam,
+// which reads a game's preferences; the settings window calls this one (Launcher.swift). 2 = the NX 18 folder, 1 = the own folder, 0 = off; the folder in `out`.
+// missed: set when nx18.cloud says the NX 18 folder and none is connected or it cannot be reached (NULL: not asked). A DM_SAVE_SYNC from the launch or an env file is the caller's
+int dm_mac_cloud_place(char *out, size_t n, int *missed) {
+    CFStringRef domain = CFBundleGetIdentifier(CFBundleGetMainBundle());
+    char own[PATH_MAX], choice[16], nx[PATH_MAX] = "", line[PATH_MAX]; struct stat st;
+    if (missed) *missed = 0;
+    if (!out || !n) return 0;
+    out[0] = 0;
+    if (!domain) return 0;
+    pref_string(domain, CFSTR("cloudSaves.folder"), own, sizeof own);
+    pref_string(domain, CFSTR("nx18.cloud"), choice, sizeof choice);
+    const char *home = getenv("HOME");   // as profile_env: the nxnative folder under HOME
+    if (home && *home && snprintf(line, sizeof line, "%s/Library/Application Support/nxnative/nx18-folder", home) < (int)sizeof line) {
+        FILE *f = fopen(line, "r");
+        if (f) { if (fgets(nx, sizeof nx, f)) nx[strcspn(nx, "\r\n")] = 0; fclose(f); }
+        if (*nx && (stat(nx, &st) || !S_ISDIR(st.st_mode))) nx[0] = 0;   // a folder no longer there (iCloud Drive off, removed): not used
+    }
+    // own_set: cloudSaves.folder there at all. "" is a Turn off (the window's Cloud saves page stores ""): this Mac keeps its own save, and the default never starts syncing it
+    CFPropertyListRef ov = CFPreferencesCopyAppValue(CFSTR("cloudSaves.folder"), domain); int own_set = ov != NULL; if (ov) CFRelease(ov);
+    // The card's NX 18 folder holds whatever the Profile switch says, as on the iPhone (dm_cloud_saves_env): the switch's Off moves the save first and changes nx18.cloud only once
+    // the move is checked (MacSavesFlow). The default needs the switch on
+    int shared = !strcmp(choice, "shared"), dflt = !shared && strcmp(choice, "own") && !own_set && profile_on(domain);
+    const char *use = NULL; int k = 0;
+    if ((shared || dflt) && *nx) { use = nx; k = 2; }
+    else {
+        if (missed && !strcmp(choice, "shared") && !*nx) *missed = 1;
+        if (*own) { use = own; k = 1; }
+    }
+    if (!use || snprintf(out, n, "%s", use) >= (int)n) { out[0] = 0; return 0; }
+    return k;
+}
+
+// With or without the window, after it: a DM_SAVE_SYNC the launch environment or an env file set wins. The log says which place, never the folder's path (it may carry a name)
+static void cloud_saves_folder(void) {
+    if (getenv("DM_SAVE_SYNC")) return;
+    char f[PATH_MAX]; int missed, k = dm_mac_cloud_place(f, sizeof f, &missed);
+    if (missed) fprintf(stderr, "launcher: this game's saves use the NX 18 folder, which is not connected or cannot be reached now; %s\n", k ? "they go through its own folder" : "cloud saves are off");
+    if (k) { setenv("DM_SAVE_SYNC", f, 1); fprintf(stderr, "launcher: cloud saves through %s\n", k == 2 ? "the NX 18 folder" : "this game's own folder"); }
 }
 
 // The NX 18 Profile (gate-ui §20.5): the name and picture the games see, from ~/Library/Application Support/nxnative/Profile/ (shared by every NX 18 Mac app; plain
 // files, written by the settings window's card, NX18Profile.swift). nx18.profile in this app's preferences turns it off for this game. An env file or launch value wins;
 // neither value is logged (only "profile: on" / "off")
 static void profile_env(void) {
-    CFStringRef domain = CFBundleGetIdentifier(CFBundleGetMainBundle());
-    int on = 1;
-    if (domain) { CFPropertyListRef v = CFPreferencesCopyAppValue(CFSTR("nx18.profile"), domain); if (v && CFGetTypeID(v) == CFBooleanGetTypeID()) on = CFBooleanGetValue(v); if (v) CFRelease(v); }
+    int on = profile_on(CFBundleGetIdentifier(CFBundleGetMainBundle()));
     const char *home = getenv("HOME"); char dir[PATH_MAX], p[PATH_MAX], name[96] = "";
     if (!home) return;
     snprintf(dir, sizeof dir, "%s/Library/Application Support/nxnative/Profile", home);
@@ -199,6 +246,25 @@ static void log_open(const char *log) {
     int err = dm_log_redirect(log, 0644, STDOUT_FILENO);
     if (err) { fprintf(stderr, "[RED] launcher: %s cannot be written (%s): no log for this run\n", log, strerror(err)); return; }
     setvbuf(stdout, NULL, _IOLBF, 0);
+}
+
+// The in-game menu's Exit and return to Gate (dm/ios/Sources/GameMenu.swift macExitToGate): the host leaves launcher.gateNext in the app's preferences and quits. Once it has ended
+// and its save went to the cloud, this launcher opens the app again (a new process, open -n: LaunchServices starts it with no environment from here, so DM_LAUNCHER=0 from this
+// start's launch does not come along), and that start shows the settings window, once, whatever skips it (env files, --no-launcher, Gate at start off: dm_mac_launcher's
+// MacGateStart takes the key away). Read fresh from the preferences store: the host wrote it from another process
+static int gate_next(void) {
+    CFStringRef domain = CFBundleGetIdentifier(CFBundleGetMainBundle()); Boolean valid = false;
+    if (!domain) return 0;
+    CFPreferencesAppSynchronize(domain);
+    return CFPreferencesGetAppBooleanValue(CFSTR("launcher.gateNext"), domain, &valid) && valid;
+}
+static void reopen_at_gate(const char *contents) {
+    char app[PATH_MAX]; snprintf(app, sizeof app, "%s", contents); char *slash = strrchr(app, '/'); if (slash) *slash = 0;   // .../Game.app/Contents → .../Game.app
+    char *open_argv[] = {"open", "-n", app, NULL}; pid_t pid; int st;
+    int err = posix_spawn(&pid, "/usr/bin/open", NULL, NULL, open_argv, environ);
+    if (err) { fprintf(stderr, "[RED] launcher: the app cannot be opened again for the settings window: %s\n", strerror(err)); return; }
+    while (waitpid(pid, &st, 0) < 0 && errno == EINTR) {}
+    fprintf(stderr, "launcher: the app opens again at the settings window (Exit and return to Gate)\n");
 }
 
 int main(int argc, char **argv) {
@@ -249,6 +315,7 @@ int main(int argc, char **argv) {
     setenv("DM_SAVE", save, 0);   // before the window: its cloud-save check compares this save with the cloud's (Launcher.swift SaveCheck)
     int window = !(getenv("DM_LAUNCHER") && !strcmp(getenv("DM_LAUNCHER"), "0"));
     for (int i = 1; i < argc; i++) if (!strcmp(argv[i], "--no-launcher")) window = 0;
+    if (!window && gate_next()) { window = 1; fprintf(stderr, "launcher: settings window shown once (Exit and return to Gate)\n"); }
     if (!window) fprintf(stderr, "launcher: no settings window (DM_LAUNCHER=0 or --no-launcher)\n");
     int shown = window ? dm_mac_launcher() : 2;
     if (!shown) return 0;   // Quit: no game
@@ -257,6 +324,9 @@ int main(int argc, char **argv) {
         char v[32]; snprintf(v, sizeof v, "%lld.%06ld", (long long)opened.tv_sec, opened.tv_nsec / 1000); setenv("DM_PLAY_AT", v, 1);
     }
     cloud_saves_folder();
+    // Before the host acts on DM_SAVE_SYNC: the first sync of this game through that folder on this Mac waits (bounded) for iCloud to list and download the save another
+    // device put there, or holds this start's sync (DM_SAVE_SYNC_CHOICE=hold). Play and the check without the window ran it already; this covers DM_LAUNCHER=0 (NX 18 Beam's Play)
+    if (!dm_mac_first_sync()) { fprintf(stderr, "launcher: quit at the iCloud check, without starting the game\n"); return 0; }
     profile_env();
     setenv("DM_ROOT", sup, 0); setenv("DM_ROMFS", romfs, 0); setenv("DM_TEMP", temp, 0);
     snprintf(p, sizeof p, "%s/msl", res); setenv("DM_MSL_DIR", p, 0);
@@ -281,5 +351,6 @@ int main(int argc, char **argv) {
     if (!save_sync_after_exit(getenv("DM_SAVE"), id)) fprintf(stderr, "launcher: the save did not reach the cloud; it goes at the next start\n");
     if (WIFSIGNALED(status)) { fprintf(stderr, "launcher: the host stopped on signal %d\n", WTERMSIG(status)); return 128 + WTERMSIG(status); }
     fprintf(stderr, "launcher: the host exited with %d\n", WEXITSTATUS(status));
+    if (WEXITSTATUS(status) == 0 && gate_next()) reopen_at_gate(contents);
     return WEXITSTATUS(status);
 }

@@ -5,6 +5,10 @@ options:
   deploymentTarget:
     macOS: "27.2"
   createIntermediateGroups: true
+  xcodeVersion: "27.3"   # LastUpgradeCheck: Xcode's "Update to recommended settings" is answered here, since Beam.xcodeproj is generated
+settings:
+  base:
+    STRING_CATALOG_GENERATE_SYMBOLS: YES   # Xcode 27's recommended setting (String Catalog symbols); asset symbol extensions stay off, as Xcode leaves them
 configFiles:
   Debug: Config/Beam.xcconfig
   Release: Config/Beam.xcconfig
@@ -16,6 +20,8 @@ targets:
       - path: Sources
         type: syncedFolder   # Xcode's own folder: a new file there is in the build at once, no xcodegen run needed
       - path: Resources/Assets.xcassets
+      - path: Resources/AppIcon.icon   # the app icon: Icon Composer's layered Liquid Glass format (make_logo.py writes it); Xcode compiles it into Assets.car and AppIcon.icns
+        buildPhase: resources
       - path: Resources/Credits.rtf
         buildPhase: resources
       - path: ../scripts/release/nx18-setup.sh   # NX 18's setup, which Beam runs with --json before NX 18 is on the Mac (Setup.swift)
@@ -35,6 +41,7 @@ targets:
       - path: ../dm/ios/Sources/NXButtonGlyphData.swift
       - path: ../dm/ios/Sources/NX18Card.swift
       - path: ../dm/ios/Sources/NX18Profile.swift
+      - path: ../dm/ios/Sources/GameDocuments.swift   # the game apps' documents: Beam keeps My files in the NX 18 folder under its names (MyFilesPlace.swift)
     dependencies:
       - sdk: SwiftUI.framework
       - sdk: AppKit.framework

@@ -273,6 +273,7 @@ struct GatePanel: View {
     var quiet = false                       // the NX 18 card is open over it: no hint strip (the card shows its own)
     let glyphs: NXPadGlyphs
     let status: LauncherStatus.Cloud
+    var savesInNX18Folder = false           // this game's saves go through the NX 18 folder (the NX 18 card's This game's saves): the Cloud saves door says so
     let gateAtStartLocked: Bool             // DM_LAUNCHER from an env file or the launch decides
     let footer: AnyView                     // the end of Customize: the game's and NX 18's versions and the button icons' credit (Launcher.swift; About this game carries them too)
     let acknowledgements: Bool
@@ -416,7 +417,7 @@ struct GatePanel: View {
             tileRow(m.gateFirstTiles)
             HStack(spacing: 8) {
                 door(id: "customize", name: "Customize", sub: "Every setting", icon: .sliders) { pages.append(.customize) }
-                door(id: "cloud", name: "Cloud saves", sub: status == .off ? "Off" : "Own folder", icon: .cloud) { pages.append(.cloud) }
+                door(id: "cloud", name: "Cloud saves", sub: status == .off ? "Off" : savesInNX18Folder ? "NX 18 folder" : "Own folder", icon: .cloud) { pages.append(.cloud) }
             }
             tileRow(m.gateSecondTiles)
             if !m.gateModTiles.isEmpty { tileRow(m.gateModTiles) }

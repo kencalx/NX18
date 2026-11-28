@@ -10,15 +10,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tools'))
 import shader_split as split
 
 
-def program(stages, extra=0):
+def program(stages, extra=0, nvn2=False):
+    """A synthetic HCPS program: Maxwell controls (0x880 + extra bytes, length at +0x20, code length at +0x704, a code header) or NVN2 ones (version 0xc9, 0xd8 bytes,
+    length at +0x30, code length at +0x44, the SPH at the code area's start)"""
     controls, codes = [], []
     for stage in stages:
-        ctl, code = bytearray(0x880 + extra), bytearray(0x100)
+        ctl, code = bytearray(0xd8 if nvn2 else 0x880 + extra), bytearray(0x100)
         ctl[:4] = split.CTL_MAGIC
-        struct.pack_into('<I', ctl, 0x20, len(ctl))
-        struct.pack_into('<I', ctl, 0x704, len(code))
-        code[:4] = split.GFX_MAGIC
-        struct.pack_into('<I', code, 0x30, (split.STAGES.index(stage) + 1) << 10 | 1)
+        struct.pack_into('<I', ctl, 0x30 if nvn2 else 0x20, len(ctl))
+        struct.pack_into('<I', ctl, 0x44 if nvn2 else 0x704, len(code))
+        if nvn2: struct.pack_into('<I', ctl, 4, 0xc9)
+        else: code[:4] = split.GFX_MAGIC
+        struct.pack_into('<I', code, 0 if nvn2 else 0x30, (split.STAGES.index(stage) + 1) << 10 | 1)
         controls.append(bytes(ctl)); codes.append(bytes(code))
     # One SLCT, two identical variants; each vertex bundle includes geometry.
     slct = bytearray(72 + 16 + 2 * 52)
@@ -41,7 +44,62 @@ def program(stages, extra=0):
     return bytes(head) + slct + ctl + code, controls, codes
 
 
+def standalone_slct(data, ctls):
+    """The program's SLCT section as main embeds it: no HCPS header, control and code offsets relative to the SLCT (192 bytes in this fixture)"""
+    body = bytearray(data[80:])
+    struct.pack_into('<I', body, 4, 0x1003)
+    struct.pack_into('<I', body, 40, 192)
+    struct.pack_into('<I', body, 48, 192 + sum((len(c) + 7) & ~7 for c in ctls) * 2)
+    return bytes(body)
+
+
 class MonolithTests(unittest.TestCase):
+    # Maxwell and NVN2 HCPS programs (ported from NXNative b32d0bf3b, MIT): each control's own version picks its layout. Xenoblade Chronicles X: Definitive Edition's
+    # Switch 2 Edition stopped the split at an NVN2 SLCT in main ('main#SLCT@... HCPS: truncated control') while the reader assumed 0x708+ byte Maxwell controls
+    def test_nvn2_program(self):
+        data, ctls, codes = program(['vs', 'ps'], nvn2=True)
+        out = split.hcps_shaders(data, 0, '/nvn2')
+        self.assertEqual([(s, c, k) for _, s, c, k in out], list(zip(['vs', 'ps'], ctls, codes)) * 2)
+        self.assertEqual(split.var_pairs(out), {(split.skey(ctls[0], codes[0]), split.skey(ctls[1], codes[1]))})
+
+    def test_nvn2_program_with_embedded_geometry(self):
+        data, ctls, codes = program(['vs', 'gs', 'ps'], nvn2=True)
+        out = split.hcps_shaders(data, 0, '/nvn2')
+        self.assertEqual([(s, c, k) for _, s, c, k in out], list(zip(['vs', 'gs', 'ps'], ctls, codes)) * 2)
+
+    def test_nvn2_standalone_slct_in_main(self):
+        data, ctls, codes = program(['vs', 'ps'], nvn2=True)
+        out = []; split.scan_blob(standalone_slct(data, ctls), 'main', out)
+        self.assertEqual([(s, ctl, code) for _, s, ctl, code in out], list(zip(['vs', 'ps'], ctls, codes)) * 2)
+        self.assertTrue(all(w.startswith('main#SLCT@') for w, *_ in out))
+
+    def test_asset_with_maxwell_and_nvn2_programs(self):
+        maxwell, mc, mk = program(['vs', 'ps'], extra=-0x30)
+        nvn2, nc, nk = program(['vs', 'ps'], nvn2=True)
+        found = []; split.monolith_shaders(maxwell + nvn2, '/mixed', found)
+        self.assertEqual({split.skey(c, k) for _, _, c, k in found}, {split.skey(c, k) for c, k in zip(mc + nc, mk + nk)})
+        self.assertEqual(len(split.var_pairs(found)), 2)
+
+    def test_maxwell_program_reads_as_before(self):
+        # The Maxwell path (Xenoblade 2, 3 and DE) is unchanged: same shaders, labels and pairs
+        data, ctls, codes = program(['vs', 'ps'])
+        out = split.hcps_shaders(data, 0, '/maxwell')
+        self.assertEqual(out, [(f'/maxwell#HCPS@0x0#var0.{j}', s, c, k) for j in (0, 1) for s, c, k in zip(['vs', 'ps'], ctls, codes)])
+
+    def test_truly_truncated_controls_still_stop_the_split(self):
+        # Variant 0's NVSD record (HCPS header 80 + SLCT 88 + 32): pixel control bytes at +16. Fewer than a control's minimum still reads as truncated
+        for nvn2, short in ((True, 0x40), (False, 0x700)):
+            data = bytearray(program(['vs', 'ps'], nvn2=nvn2)[0])
+            struct.pack_into('<I', data, 80 + 88 + 32 + 16, short)
+            with self.subTest(nvn2=nvn2), self.assertRaisesRegex(SystemExit, 'HCPS: truncated control'):
+                split.hcps_shaders(bytes(data), 0, '/short')
+
+    def test_nvn2_control_longer_than_its_program_is_rejected(self):
+        data = bytearray(program(['vs', 'ps'], nvn2=True)[0])
+        struct.pack_into('<I', data, 80 + 192 + 0x30, 0x1000)   # the first control's own length
+        with self.assertRaisesRegex(SystemExit, 'exceeds program range'):
+            split.hcps_shaders(bytes(data), 0, '/long')
+
     def test_loose_containers_reach_the_archive_decoder(self):
         data, controls, codes = program(['vs', 'ps'])
         packed = zlib.compress(data, level=0)
@@ -89,6 +147,7 @@ class MonolithTests(unittest.TestCase):
         struct.pack_into('<I', body, 48, c + sum(map(len, ctls)) * 2)
         out = []; split.scan_blob(bytes(body), 'main', out)
         self.assertEqual([(s, ctl, code) for _, s, ctl, code in out], list(zip(['vs', 'ps'], ctls, codes)) * 2)
+        self.assertEqual(standalone_slct(data, ctls), bytes(body))
 
     def test_effect_glslc_output_inside_xbc(self):
         _, controls, codes = program(['vs', 'ps'])
@@ -141,6 +200,39 @@ class MonolithTests(unittest.TestCase):
         header = struct.pack('<4s9I8x', b'arh1', len(strings), len(nodes), so, len(strings), no, len(trie), fo, 1, int.from_bytes(mask, 'little') ^ 0xf3f35353)
         data = header + enc(strings) + enc(trie) + struct.pack('<Q4I', 32, 100, 200, 2, 0)
         self.assertEqual(split.arh_entries(data), [('a.bin', 32, 148)])
+
+    def test_arh2_reads_aligned_bounded_members(self):
+        shader, controls, codes = program(['vs', 'ps'])
+        packed = zlib.compress(shader)
+        wrapped = struct.pack('<4s3I32x', b'xbc1', 1, len(shader), len(packed)) + packed
+        # A stored member can still carry XBC1 (expanded size zero). Its compressed bytes are included in disk size, unlike ARH1's wrapper
+        index = struct.pack('<4s3I', b'arh2', 3, 16, 0)
+        index += struct.pack('<Q2I', 0x123, 3, 0)
+        index += struct.pack('<Q2I', 0x456, 0, 0)
+        index += struct.pack('<Q2I', 0x789, len(wrapped), 0)
+        with tempfile.TemporaryDirectory() as td:
+            arh, ard = Path(td) / 'test.arh', Path(td) / 'test.ard'
+            arh.write_bytes(index); ard.write_bytes(b'abc'.ljust(16, b'\0') + wrapped)
+            jobs, used = split.arh_jobs([(str(arh), 'test.arh'), (str(ard), 'test.ard')], parts=1)
+            self.assertEqual(used, {str(arh), str(ard)})
+            self.assertEqual(jobs[0][2][1], [('/#0000000000000123', 0, 3), ('/#0000000000000789', 16, len(wrapped))])
+            _, keys, pairs, _ = split.scan_file(jobs[0])
+        self.assertEqual(set(keys), {split.skey(c, k) for c, k in zip(controls, codes)})
+        self.assertEqual(pairs, {(split.skey(controls[0], codes[0]), split.skey(controls[1], codes[1]))})
+
+    def test_arh2_rejects_bad_index_and_member_bounds(self):
+        for data, why in [(b'arh2', 'truncated header'),
+                          (struct.pack('<4s3I', b'arh2', 0, 0, 0), 'file alignment'),
+                          (struct.pack('<4s3I', b'arh2', 0, 3, 0), 'file alignment'),
+                          (struct.pack('<4s3I', b'arh2', 1, 16, 0), 'table out of bounds')]:
+            with self.subTest(why=why), self.assertRaisesRegex(SystemExit, why):
+                split.arh_entries(data)
+        with tempfile.TemporaryDirectory() as td:
+            arh, ard = Path(td) / 'test.arh', Path(td) / 'test.ard'
+            arh.write_bytes(struct.pack('<4s3IQ2I', b'arh2', 1, 16, 0, 1, 20, 0))
+            ard.write_bytes(b'123')
+            with self.assertRaisesRegex(SystemExit, 'ARD entry out of bounds'):
+                split.arh_jobs([(str(arh), 'test.arh')])
 
 
 if __name__ == '__main__':

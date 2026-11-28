@@ -181,6 +181,8 @@ struct ProfileWelcomePanel: View {
 // ---- Settings ----
 
 struct ProfileSettingsSection: View {
+    @Environment(BeamSettings.self) private var settings
+    @Environment(Library.self) private var library
     @State private var model = ProfileModel.shared
     @State private var name = ProfileModel.shared.name == "Player" ? "" : ProfileModel.shared.name
     @State private var proposed: URL?
@@ -223,8 +225,40 @@ struct ProfileSettingsSection: View {
             }
             .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in model.reload() }   // a Mac game's card may have changed it
             if let n = model.note { Text(n).font(.callout) }
+            // My files (each game's own guides and maps) in the NX 18 folder's <TITLE ID>/Documents, beside its Captures (MyFilesPlace.swift): moved there when turned on, Beam's
+            // own moved back when turned off
+            Toggle(isOn: Binding(get: { settings.myFilesInNX18 }, set: { v in settings.myFilesInNX18 = v; Task { await library.settleMyFiles() } })) {
+                Text("Keep My files in the NX 18 folder")
+                Text("Your own guides and maps for each game go in the NX 18 folder, so your games on every device connected to it can show them while you play.")
+            }
+            if let n = library.myFilesNote { Text(n).font(.callout) }
         } header: { Text("Profile") } footer: {
             Text(ProfileSetup.explanation + " Beam's Album shows each game's captures from the folder.")
         }
+    }
+}
+
+// ---- Beam Home ----
+
+/// Beam Home's Profile (the chip in its top bar, or − on the controller): Settings' Profile section in a sheet over Home, closed with Done, Escape, or B or − on the controller
+struct ProfileSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("Profile").font(.title2.weight(.semibold))
+                Spacer()
+                Button("Done") { HomeSounds.play(.b); dismiss() }.keyboardShortcut(.cancelAction)   // the controller's B and − close it in HomeView, with the same sound
+            }
+            .padding(.horizontal, 20).padding(.vertical, 14)
+            Form { ProfileSettingsSection() }
+                .formStyle(.grouped)
+                .scrollContentBackground(.hidden)
+            HStack { Spacer(); BeamHintsBar(hints: [BeamHint(.pad(.b), "Close")]) }   // as Home's hints bar shows its buttons
+                .padding(.horizontal, 20).padding(.vertical, 12)
+        }
+        .frame(width: 600, height: 440)
+        .background { ZStack { NX18Palette.background; NX18Glow() } }
+        .environment(\.colorScheme, .dark)
     }
 }

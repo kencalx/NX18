@@ -1,0 +1,92 @@
+{
+  "fill": {
+    "solid": "extended-srgb:0.16471,0.16471,0.17647,1.00000"
+  },
+  "groups": [
+    {
+      "layers": [
+        {
+          "glass": true,
+          "image-name": "nx.svg",
+          "name": "nx"
+        },
+        {
+          "glass": true,
+          "image-name": "x-under.svg",
+          "name": "x-under",
+          "opacity-specializations": [
+            {
+              "appearance": "tinted",
+              "value": 0.7
+            }
+          ]
+        },
+        {
+          "glass": true,
+          "image-name": "pill-18.svg",
+          "name": "pill-18",
+          "opacity-specializations": [
+            {
+              "appearance": "tinted",
+              "value": 0.7
+            }
+          ]
+        }
+      ],
+      "name": "NX18",
+      "shadow": {
+        "kind": "layer-color",
+        "opacity": 0.5
+      },
+      "specular": true,
+      "translucency": {
+        "enabled": true,
+        "value": 0.2
+      }
+    },
+    {
+      "layers": [
+        {
+          "glass": true,
+          "image-name": "b-bowl.svg",
+          "name": "b-bowl",
+          "opacity-specializations": [
+            {
+              "appearance": "tinted",
+              "value": 0.7
+            }
+          ]
+        },
+        {
+          "glass": true,
+          "image-name": "b-stem.svg",
+          "name": "b-stem"
+        },
+        {
+          "glass": true,
+          "image-name": "dashes.svg",
+          "name": "dashes",
+          "opacity-specializations": [
+            {
+              "appearance": "tinted",
+              "value": 0.7
+            }
+          ]
+        }
+      ],
+      "name": "Beam",
+      "shadow": {
+        "kind": "layer-color",
+        "opacity": 0.5
+      },
+      "specular": true,
+      "translucency": {
+        "enabled": true,
+        "value": 0.2
+      }
+    }
+  ],
+  "supported-platforms": {
+    "squares": "shared"
+  }
+}

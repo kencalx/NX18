@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """The NX 18 logo: a monoline NX (cyan N, an X whose coral stroke passes under the cyan one) with a small 18 in a coral pill as an exponent.
 Colours from the Switch 2 Joy-Con: charcoal body, cyan left rail, coral right rail. Every letter is drawn, no fonts.
-python3 docs/images/nx18/make_logo.py writes the SVGs beside it, Beam's too (beam-icon*.svg, beam-title-*.svg). nx18-icon-square-1024.png (the app icon the NSP script gives an app whose game
+python3 docs/images/nx18/make_logo.py writes the SVGs beside it, Beam's too (beam-icon*.svg, beam-title-*.svg), and Beam's app icon, beam/Resources/AppIcon.icon (Icon Composer's layered format). nx18-icon-square-1024.png (the app icon the NSP script gives an app whose game
 has no icon) is nx18-icon-square.svg rendered at 1024 px and flattened, as Xcode wants an icon without alpha:
   qlmanage -t -s 1024 -o /tmp nx18-icon-square.svg; sips -s format jpeg -s formatOptions 100 /tmp/nx18-icon-square.svg.png --out /tmp/i.jpg; sips -s format png /tmp/i.jpg --out nx18-icon-square-1024.png"""
-import math, os
+import json, math, os
 OUT = os.path.dirname(os.path.abspath(__file__))
 CHAR, CYAN, CORAL, WHITE = "#2A2A2D", "#00C8F5", "#FF6B5A", "#FFFFFF"
 W, H, T, B, GAP = 18, 104, 9, 95, 6
@@ -91,6 +91,45 @@ def beam_title(v):
     body += dashes(x1, 1)
     w = x1 + dl + W / 2                                    # W / 2: the last dash's round end
     return place(body, (-W / 2, -26, w + W / 2, 130), round((w + W) * 1.2 + 40), 200, 1.2), round((w + W) * 1.2 + 40)   # 156 units tall: 187 of the 200
+# Beam's Liquid Glass app icon (beam/Resources/AppIcon.icon, Icon Composer's format; Xcode compiles it): beam_icon(False) taken apart into
+# one SVG per layer on the 1024 canvas, each piece where it sits in beam-icon-square.svg, plus icon.json. The charcoal is the document's fill,
+# not a layer, so the system can tint and darken it; the 18's digits are cut out of the pill, so the pill is one glass shape in every rendition.
+ICON_DIR = os.path.join(OUT, '..', '..', '..', 'beam', 'Resources', 'AppIcon.icon')
+def beam_icon_layers():
+    _, bb = mark(CYAN, CYAN, CORAL, CORAL, CHAR, True, S2=0.5, PADX=18, PADY=12)
+    S2, PADX, PADY = 0.5, 18, 12
+    DW, DH = (36 + 18 + 66) * S2, H * S2
+    PW, PH = DW + 2 * PADX, DH + 2 * PADY
+    px, py = NXW + PGAP, -RISE
+    dm = g(px + PADX, py + PADY, S2, one('#000') + f'<g transform="translate(54 0)">{eight('#000')}</g>')
+    pill = (f'<mask id="digits" maskUnits="userSpaceOnUse" x="{f(px-5)}" y="{f(py-5)}" width="{f(PW+10)}" height="{f(PH+10)}"><rect x="{f(px)}" y="{f(py)}" width="{f(PW)}" height="{f(PH)}" rx="{f(PH/2)}" fill="#fff"/>{dm}</mask>'
+            f'<rect x="{f(px)}" y="{f(py)}" width="{f(PW)}" height="{f(PH)}" rx="{f(PH/2)}" fill="{CORAL}" mask="url(#digits)"/>')
+    dl, gap, bw, s = 58, 40, 66, 0.9                       # as beam_icon
+    roww = 2 * (dl + gap) + bw
+    rx, ry = bb[2] / 2 - roww * s / 2, 104 + 70
+    def row(body): return f'<g transform="translate({f(rx)} {f(ry)}) scale({f(s)})">{body}</g>'
+    lo = f'M{9 + W + GAP} 52 H44 A21.5 21.5 0 0 1 44 95 H{9 + W + GAP}'
+    parts = {   # file: body in the mark's units; top to bottom as icon.json stacks them
+        'nx.svg': g(0, 0, 1, N(CYAN)) + g(104, 0, 1, f'<path d="M9 {T} L73 {B}" stroke="{CYAN}"/>'),
+        'x-under.svg': g(104, 0, 1, f'<path d="M9 {B} L{f(p1[0])} {f(p1[1])} M{f(p2[0])} {f(p2[1])} L73 {T}" stroke="{CORAL}"/>'),
+        'pill-18.svg': pill,
+        'b-bowl.svg': row(g(dl + gap - 9, 0, 1, f'<path d="{lo}" stroke="{CORAL}"/>')),   # over the stem's upper bowl, as in beam_icon
+        'b-stem.svg': row(g(dl + gap - 9, 0, 1, f'<path d="M9 95 V9 H40 A21.5 21.5 0 0 1 40 52 H9" stroke="{CYAN}"/>')),
+        'dashes.svg': row(dashes(dl, -1) + dashes(dl + gap + bw + gap, 1)),
+    }
+    return {n: svg(1024, 1024, place(b, (0, -26, bb[2], ry + 104 * s), 1024, 1024, 2.3), f'Beam app icon layer {n[:-4]}') for n, b in parts.items()}
+def beam_icon_json():
+    def c(hx, a=1.0): return 'extended-srgb:' + ','.join(f'{v:.5f}' for v in [int(hx[i:i + 2], 16) / 255 for i in (1, 3, 5)] + [a])
+    def layer(n, glass=True, coral=False):   # tinted and clear icons are one colour: the coral strokes stay a step dimmer there, so the splits still read
+        return {'glass': glass, 'image-name': n, 'name': n[:-4]} | ({'opacity-specializations': [{'appearance': 'tinted', 'value': 0.7}]} if coral else {})
+    def group(name, layers): return {'layers': layers, 'name': name, 'shadow': {'kind': 'layer-color', 'opacity': 0.5}, 'specular': True,
+                                     'translucency': {'enabled': True, 'value': 0.2}}
+    return {
+        'fill': {'solid': c(CHAR)},
+        'groups': [group('NX18', [layer('nx.svg'), layer('x-under.svg', coral=True), layer('pill-18.svg', coral=True)]),
+                   group('Beam', [layer('b-bowl.svg', coral=True), layer('b-stem.svg'), layer('dashes.svg', coral=True)])],
+        'supported-platforms': {'squares': 'shared'},
+    }
 def svg(w, h, body, title): return f'<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" viewBox="0 0 {w} {h}"><title>{title}</title>{body}</svg>\n'
 def write(n, s): open(os.path.join(OUT, n), 'w').write(s)
 if __name__ == '__main__':
@@ -100,3 +139,6 @@ if __name__ == '__main__':
     write('beam-icon.svg', svg(1024, 1024, beam_icon(True), 'NX 18 Beam app icon'))
     write('beam-icon-square.svg', svg(1024, 1024, beam_icon(False), 'NX 18 Beam app icon, full bleed (beam/scripts/make_icons.swift renders the app icon set from it)'))
     for v in BEAM_V: body, tw = beam_title(v); write(f'beam-title-{v}.svg', svg(tw, 200, body, f'NX 18 Beam ({v})'))
+    os.makedirs(os.path.join(ICON_DIR, 'Assets'), exist_ok=True)
+    for n, s in beam_icon_layers().items(): write(os.path.join(ICON_DIR, 'Assets', n), s)
+    write(os.path.join(ICON_DIR, 'icon.json'), json.dumps(beam_icon_json(), indent=2) + '\n')

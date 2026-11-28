@@ -4,7 +4,7 @@ import Testing
 @testable import NX_18_Beam
 
 @Suite struct PlayTests {
-    /// A stand-in Mac app: its executable writes DM_LAUNCHER to `mark` and exits with `code`
+    /// A stand-in Mac app: its executable writes DM_LAUNCHER to `mark` (and DM_STARTED_BY to `mark`.by) and exits with `code`
     private func fakeApp(code: Int32, mark: URL) throws -> URL {
         let app = FileManager.default.temporaryDirectory.appending(path: "beam-test-\(UUID().uuidString)/Game.app")
         let macos = app.appending(path: "Contents/MacOS")
@@ -12,7 +12,7 @@ import Testing
         let plist: [String: Any] = ["CFBundleExecutable": "game", "CFBundleIdentifier": "org.nx18.beam.test-game", "CFBundlePackageType": "APPL"]
         try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0).write(to: app.appending(path: "Contents/Info.plist"))
         let exe = macos.appending(path: "game")
-        try "#!/bin/sh\nprintf '%s' \"$DM_LAUNCHER\" > '\(mark.path)'\nexit \(code)\n".write(to: exe, atomically: true, encoding: .utf8)
+        try "#!/bin/sh\nprintf '%s' \"$DM_LAUNCHER\" > '\(mark.path)'\nprintf '%s' \"$DM_STARTED_BY\" > '\(mark.path).by'\nexit \(code)\n".write(to: exe, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: exe.path)
         return app
     }
@@ -23,6 +23,16 @@ import Testing
         let end = try await GamePlayer.play(try fakeApp(code: 0, mark: mark)) { started.set($0) }
         #expect(end == .quit && end.message == nil && started.get() != nil)
         #expect(try String(contentsOf: mark, encoding: .utf8) == "0", "DM_LAUNCHER=0: the game starts at once")
+    }
+    @Test func noExtraSwitchBringsTheSettingsWindowBack() async throws {
+        let mark = FileManager.default.temporaryDirectory.appending(path: "beam-mark-\(UUID().uuidString)")
+        _ = try await GamePlayer.play(try fakeApp(code: 0, mark: mark), extraEnvironment: ["DM_LAUNCHER": "1"])
+        #expect(try String(contentsOf: mark, encoding: .utf8) == "0", "a Beam start never shows the Gate")
+    }
+    @Test func playMarksTheStartAsBeams() async throws {
+        let mark = FileManager.default.temporaryDirectory.appending(path: "beam-mark-\(UUID().uuidString)")
+        _ = try await GamePlayer.play(try fakeApp(code: 0, mark: mark), extraEnvironment: ["DM_STARTED_BY": "finder"])
+        #expect(try String(contentsOf: URL(fileURLWithPath: mark.path + ".by"), encoding: .utf8) == "beam", "the game's Exit and return goes back to Beam")
     }
     @Test func exitCodes() async throws {
         let mark = FileManager.default.temporaryDirectory.appending(path: "beam-mark-\(UUID().uuidString)")

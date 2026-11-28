@@ -62,6 +62,10 @@ uint64_t ss_passes(void);                       // the sender's passes (each clo
 // `wait_ms` how long the cloud's file may take to come (<= 0: as long as the mount waits). Blocks that long at most: call it off the main thread.
 // 0 on success, -1 when the arguments do not fit or this device's save cannot be read
 int save_sync_report(const char *save, const char *title, const char *folder, int wait_ms, char *out, size_t n);
+// 1 when <save>.sync says this device has synced the game through `folder` (DM_SAVE_SYNC's form): a base kept for that folder's very file. The Mac launcher's first-sync
+// check (dm/mac/MacFirstSync.swift) waits for iCloud before a game's first sync through a folder, and sets DM_SAVE_SYNC_CHOICE=hold when it could not see iCloud catch up:
+// that start brings nothing in and sends nothing (the mount, the sender and save_sync_after_exit), and the next start checks again
+int save_sync_synced(const char *save, const char *title, const char *folder);
 // Moves this game's cloud save from one folder to another (gate-ui §21.4: the NX 18 folder and the game's own; folders as DM_SAVE_SYNC names them): fetches the save in `from`
 // and checks it whole, stores it in `to` (when `to` has no save of this game, or by `how`), reads it back and compares the hash. Only then may the front end switch the folder.
 // SS_MOVE_DONE: switch (also with no save to move, the same save there already, or SS_MOVE_USE_THERE); SS_MOVE_SAME: the same file, only the mode changes; SS_MOVE_ASK: `to`

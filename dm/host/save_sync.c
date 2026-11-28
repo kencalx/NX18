@@ -371,18 +371,21 @@ ss_way ss_decide(const char *local, const char *base, const char *remote, int64_
 // Any value says the front end asks the player when both changed (then neither replaces the other without a choice); unset, the newer one wins (ss_decide).
 // "ask": no choice yet (the two were the same, or only one side changed, when the front end checked). "cloud:<hash>" brings in the cloud's save with that hash,
 // "local:<hash>" lets this device's replace the cloud's save with that hash ("local:none": the cloud had none), "offline": the cloud could not be read before the start.
+// "hold": the Mac launcher's first-sync check (dm/mac/MacFirstSync.swift) could not see iCloud catch up with this game's save before the start: this start neither brings a
+// save in nor sends one (not at the mount, in play or from the launcher after the host), so a cloud save iCloud has not listed yet is never replaced; the next start checks again.
 // A choice holds only for the save it was made on: when the cloud's has changed since, it is not used (and a save that changed on both sides is replaced on neither)
-typedef enum { CH_NONE, CH_ASK, CH_CLOUD, CH_LOCAL, CH_OFFLINE } choice_kind;
+typedef enum { CH_NONE, CH_ASK, CH_CLOUD, CH_LOCAL, CH_OFFLINE, CH_HOLD } choice_kind;
 static choice_kind read_choice(char *hash) {
     const char *v = getenv("DM_SAVE_SYNC_CHOICE"); hash[0] = 0;
     if (!v || !*v) return CH_NONE;
     if (!strcmp(v, "ask")) return CH_ASK;
     if (!strcmp(v, "offline")) return CH_OFFLINE;
+    if (!strcmp(v, "hold")) return CH_HOLD;
     choice_kind k = !strncmp(v, "cloud:", 6) ? CH_CLOUD : !strncmp(v, "local:", 6) ? CH_LOCAL : CH_NONE;
     const char *h = v + 6;
     if (k == CH_LOCAL && !strcmp(h, "none")) return k;
     if (k != CH_NONE && strlen(h) == SS_HASH && strspn(h, "0123456789abcdef") == SS_HASH) { memcpy(hash, h, SS_HASH + 1); return k; }
-    SRED("DM_SAVE_SYNC_CHOICE=%s is not a choice (ask, cloud:<hash>, local:<hash>, local:none, offline): ignored, the newer save wins", v);
+    SRED("DM_SAVE_SYNC_CHOICE=%s is not a choice (ask, cloud:<hash>, local:<hash>, local:none, offline, hold): ignored, the newer save wins", v);
     return CH_NONE;
 }
 
@@ -951,6 +954,11 @@ static int mount_once(const char *save, const char *title) {
     }
     clean_backup_staging(save);   // a killed start's staging of the cloud's backup (backup_cloud_restore)
     if (!cloud_file(title, cloud, sizeof cloud)) return 0;
+    char held[SS_HASH + 1];
+    if (read_choice(held) == CH_HOLD) {   // no fetch, no compare, no sender: nothing goes to the cloud this start (g_on stays 0)
+        SLOG("held for this start: iCloud had not caught up with this game's save before it; playing on with this device's save and sending nothing; the next start checks again");
+        return 0;
+    }
     SLOG("on: %s (in play, sends at least %d s apart; at once when the in-game menu opens, the app goes to the background or the game ends)", cloud, g_gap_ms / 1000);
     snprintf(tmp, sizeof tmp, "%s.sync-tmp", save); snprintf(theirs, sizeof theirs, "%s/in.dmsync", tmp);
     if (rm_tree(tmp) || mkdirs(tmp)) { SRED("cannot make %s (errno=%d): off", tmp, errno); return 0; }   // rm_tree: what an earlier session left
@@ -1070,6 +1078,17 @@ int save_sync_report(const char *save, const char *title, const char *folder, in
     return w < 0 || w >= (int)n ? -1 : 0;
 }
 
+// Whether <save>.sync says this device has synced the game through `folder` (DM_SAVE_SYNC's form): a base kept for that folder's very file. The Mac launcher's first-sync
+// check waits for iCloud only when it has not (dm/mac/MacFirstSync.swift)
+int save_sync_synced(const char *save, const char *title, const char *folder) {
+    char dd[PATH_MAX], cloud[PATH_MAX]; sync_state st;
+    if (!save || !*save || !title || !*title || !folder) return 0;
+    snprintf(dd, sizeof dd, "%s", save); size_t L = strlen(dd); while (L > 1 && dd[L - 1] == '/') dd[--L] = 0;
+    if (!cloud_path(folder, title, cloud, sizeof cloud)) return 0;
+    read_base(dd, &st);
+    return *st.base && st.named && *st.cloud && same_cloud(st.cloud, cloud);
+}
+
 // ---------- moving this game's cloud saves between two folders (gate-ui §21.4) ----------
 // The NX 18 folder and a game's own folder: the front end switches DM_SAVE_SYNC's folder only after this has put the save where it is going and read it back. The old copy stays.
 int save_sync_move(const char *save, const char *from, const char *to, const char *title, ss_move how, int wait_ms, char *out, size_t n) {
@@ -1178,6 +1197,8 @@ int save_sync_after_exit(const char *save, const char *title) {   // save: DM_SA
     pull_journal j;
     if (journal_read(dd, &j)) { SRED("a pull of the cloud's save did not finish: nothing is sent until the next start puts this device's save back"); return 0; }   // what is in place may be half the cloud's
     if (!cloud_file(title, cloud, sizeof cloud)) return 1;
+    char held[SS_HASH + 1];
+    if (read_choice(held) == CH_HOLD) { SLOG("held for this start: nothing is sent; the next start checks again"); return 1; }
     // The host may have ended before its sender sent what its mount found to send. When that is the save its base names (another folder picked, the cloud's file
     // removed), it goes only on the mount's own mark (push_mark: this start's mount found no file there) and only where it replaces nothing: a cloud with no file now
     // either. Any other is the next start's to compare

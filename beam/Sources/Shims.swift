@@ -6,11 +6,28 @@ import GameController
 import Metal
 import MetalFX
 
-@MainActor enum MacCloud {   // LauncherPanel's Cloud saves page names the chosen folder: the game's whose settings Beam shows (GameSettingsView sets defaults)
+@MainActor enum MacCloud {   // LauncherPanel's Cloud saves page names the folder: the game's whose settings Beam shows (GameSettingsView sets defaults), its own or the NX 18 folder
     static var defaults: UserDefaults = .standard
-    static var folderName: String? {
-        let f = defaults.string(forKey: "cloudSaves.folder") ?? ""
-        return f.isEmpty ? nil : (f as NSString).lastPathComponent
+    static var folderName: String? { NX18CloudSaves.place(defaults, nx18: ProfileSetup.connectedFolder()).folder.map { ($0 as NSString).lastPathComponent } }
+}
+
+extension NX18CloudSaves {
+    /// A built Mac app's cloud-save place, as its launcher will choose it (dm/mac/launcher.c dm_mac_cloud_place): its preferences, read only, and this Mac's connected NX 18 folder.
+    /// nil: not a game app Beam can read
+    static func place(app: URL, support: URL = ProfileSetup.macSupport) -> Place? {
+        guard let id = Bundle(url: app)?.bundleIdentifier, id != Bundle.main.bundleIdentifier, let d = UserDefaults(suiteName: id) else { return nil }
+        return place(d, nx18: ProfileSetup.connectedFolder(support: support))
+    }
+}
+
+extension NX18CloudSaves.Place {
+    /// Where the save lives, in the player's words (the game page)
+    var plainWords: String {
+        switch self {
+        case .off: "Off: this Mac keeps its own save"
+        case .own(let f): "In this game's own folder, \((f as NSString).lastPathComponent)"
+        case .nx18: "In your NX 18 folder, with your other devices"
+        }
     }
 }
 

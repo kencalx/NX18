@@ -5,8 +5,8 @@
 // The look (the NX 18 palette, LauncherRow.swift): the game's key art on the left (dm/art.jpg; without it the app icon, blurred behind and sharp on top), its logo (dm/logo.png) or else its name, the status line, the coral Play pill and,
 // when the app has them, Game guide and About this game (GuideViewer.swift); the rails line; the settings on the right as the Gate's system menu (LauncherPanel.swift, NX18-X2.0
 // gate-ui.md): the preset chips, quick tiles (Console mode, Game language, Picture; Vitals, Game rumble, Touch controls; mod tiles), the Customize and Cloud saves doors, and their
-// pages; Customize ends with Gate at start (launcher.skip, stored inverted: off = the game starts at once, as with DM_LAUNCHER=0; the in-game menu's Settings screen at start turns
-// it back on, and a controller button held while the app opens shows the screen anyway, best effort; with cloud saves on, the screen shows for the cloud-save check that Play
+// pages; Customize ends with Gate at start (launcher.skip, stored inverted: off = the game starts at once, as with DM_LAUNCHER=0; the in-game menu's Exit and return to Gate shows
+// it once, and a controller button held while the app opens shows the screen anyway, best effort; with cloud saves on, the screen shows for the cloud-save check that Play
 // runs, and the game starts by itself when the check has nothing to ask, as it does for the Game shortcut, only with the app in front: LauncherShortcuts.swift)
 // the rails and the mark keep the logo's colours. A game controller drives a focus ring over all of it (LauncherController.swift)
 import CoreHaptics
@@ -115,6 +115,7 @@ struct LauncherView: View {
     let screen: Int   // this presentation's number (LauncherShortcuts.screen): a shortcut reaches only the current screen
     let checkAtStart: Bool             // shown for the cloud-save check of a start that skips the screen (Skip this screen next time, the Game shortcut): Play's check runs as it appears
     @State private var content: LauncherContent
+    @State private var mine: [GameDocument] = []   // the player's own guides and maps (GameDocuments.swift: sent by Beam, or in the NX 18 folder), listed as the screen appears: the guide's My files
     @State private var startTaken = false
     @StateObject private var pad = LauncherGamepad()
     @State private var focus: LauncherFocus? = .play
@@ -223,8 +224,9 @@ struct LauncherView: View {
         .overlay(alignment: .topLeading) { if cardOpen { cardLayer } }
         .nxTextRoot()   // NX 18's UI font for every text below that names no style (NXFont.swift); the guide and About set it again on their own roots
         .tint(GateColor.line)
+        .task { mine = await Self.playerDocuments() }
         .fullScreenCover(isPresented: shown(.guide)) {
-            LauncherGuideSheet(content: content, scroller: scroller, closeGlyph: pad.connected ? pad.glyphs.glyph(.b) : nil,
+            LauncherGuideSheet(content: content, scroller: scroller, mine: mine, closeGlyph: pad.connected ? pad.glyphs.glyph(.b) : nil,
                                turnNames: pad.connected ? (pad.glyphs.name(NXShoulder.l), pad.glyphs.name(NXShoulder.r)) : nil) { sheet = nil }
                 .preferredColorScheme(.dark)   // the Guide reader stays dark in every look (gate-ui owner check 5)
         }
@@ -286,7 +288,7 @@ struct LauncherView: View {
             stopAutoStart("shortcut Guide")
             // What the guide replaces (About, the folder picker) closes first, and the guide opens once it has gone (guideAfterClosing): changing one presentation for another in a
             // single update asked UIKit to present from a view controller that was still presenting
-            let wanted: LauncherSheet? = content.hasGuide ? .guide : content.hasAbout ? .about : nil
+            let wanted: LauncherSheet? = hasReading ? .guide : content.hasAbout ? .about : nil
             if wanted != nil && (cloudPicking || (sheet != nil && sheet != wanted)) {
                 fputs("launcher: shortcut Guide: closing what is over the settings first\n", stderr)
                 guideAfter = true; sheet = nil; cloudPicking = false
@@ -297,7 +299,7 @@ struct LauncherView: View {
 
     // The Guide shortcut's sheet: the guide, else the manual (both in LauncherGuideSheet), else About this game
     private func guideNow() {
-        if content.hasGuide { openGuide() }
+        if hasReading { openGuide() }
         else if content.hasAbout { sheet = .about }
         else { fputs("launcher: shortcut Guide: this app has no guide, manual or About this game; the settings screen stays\n", stderr) }
     }
@@ -601,9 +603,9 @@ struct LauncherView: View {
     }
 
     @ViewBuilder private func guideButton(_ l: ButtonLabel) -> some View {
-        if content.hasGuide {
-            let title = content.guide != nil ? "Game guide" : "Manual"
-            smallButton(title, short: content.guide != nil ? "Guide" : "Manual", icon: "book.closed", label: l, focus: .guide, pad: .y) { openGuide() }
+        if hasReading {   // the guide, else the manual, else the player's own documents (My files) on the same button: no new one
+            let title = content.guide != nil ? "Game guide" : content.manual != nil ? "Manual" : "My files"
+            smallButton(title, short: content.guide != nil ? "Guide" : content.manual != nil ? "Manual" : "Files", icon: "book.closed", label: l, focus: .guide, pad: .y) { openGuide() }
         }
     }
     @ViewBuilder private func aboutButton(_ l: ButtonLabel) -> some View {
@@ -657,7 +659,7 @@ struct LauncherView: View {
     // The Gate's system menu (LauncherPanel.swift): the slab with its pages, beside the art (or under it, stacked)
     private func settings(blend: Edge) -> some View {
         GatePanel(m: m, pages: $pages, focus: focus, padShown: pad.connected && sheet == nil && !cloudPicking && !cardOpen, quiet: cardOpen, glyphs: pad.glyphs, status: status.cloud,
-                  gateAtStartLocked: launcherFromEnv, footer: AnyView(panelFooter), acknowledgements: LauncherNotices.available,
+                  savesInNX18Folder: profileFlow.cloudShared, gateAtStartLocked: launcherFromEnv, footer: AnyView(panelFooter), acknowledgements: LauncherNotices.available,
                   touched: { focus = $0 }, act: gateAct)
             .background { LauncherBackdrop(wash: artwork.wash, page: pageBackground, edge: background, blend: blend).ignoresSafeArea() }
             .sheet(isPresented: $cloudPicking, onDismiss: guideAfterClosing) {
@@ -706,12 +708,21 @@ struct LauncherView: View {
         }
     }
 
+    // The guide's button and sheet: the game's guide or manual, or the player's own documents
+    private var hasReading: Bool { content.hasGuide || !mine.isEmpty }
+    static func playerDocuments() async -> [GameDocument] {
+        let found = await GameDocuments.load(manual: nil, guide: nil, guideRoot: nil, companion: GameDocuments.companionFolder(), nx18: NX18Profile.folderURL(),
+                                             titleID: Bundle.main.object(forInfoDictionaryKey: "DMTitleID") as? String)
+        if !found.isEmpty { fputs(GameDocuments.summary(found) + " (the Gate's My files)\n", stderr) }
+        return found
+    }
+
     private func openGuide() {
-        guard content.hasGuide else { return }
+        guard hasReading else { return }
         // the guide in the language picked now (Game language may have changed since the screen appeared)
         let lang = m.values["DM_LANG"] ?? ProcessInfo.processInfo.environment["DM_LANG"]
         content = LauncherContent.find(dir: dir, lang: lang)
-        if content.hasGuide { sheet = .guide }
+        if hasReading { sheet = .guide }
     }
 
     // MARK: The status line: the console and last played (once), cloud saves (as the section changes) and free memory (every 2 s)
@@ -743,7 +754,7 @@ struct LauncherView: View {
         switch pages.last ?? .main {
         case .main:
             var top: [LauncherFocus] = [.play]
-            if content.hasGuide { top.append(.guide) }
+            if hasReading { top.append(.guide) }
             top.append(.about)
             lines.append([.mark])   // the NX 18 mark above Play (G12)
             lines.append(top)
@@ -951,8 +962,10 @@ public func dmShowLauncher(_ viewController: UnsafeMutableRawPointer, _ done: @c
             fputs("launcher: shown for the cloud-save check (\(why)): the game starts by itself unless the check needs an answer\n", stderr)
             presentLauncher(model, file, dir: dir, on: parent, checkAtStart: true, done: done)
         }
-        // main.m's program record, DM_LAUNCHER from an env file or the launch, a home screen shortcut, then the player's Skip this screen next time (LauncherShortcuts.start)
-        let (start, notes) = LauncherShortcuts.start(shortcut: shortcut, environment: ProcessInfo.processInfo.environment, skipChosen: UserDefaults.standard.bool(forKey: LauncherModel.skipKey), cloudSaves: cloud)
+        // main.m's program record, the in-game menu's Exit and return to Gate (once), DM_LAUNCHER from an env file or the launch, a home screen shortcut, then the player's Skip
+        // this screen next time (LauncherShortcuts.start)
+        let (start, notes) = LauncherShortcuts.start(shortcut: shortcut, environment: ProcessInfo.processInfo.environment, skipChosen: UserDefaults.standard.bool(forKey: LauncherModel.skipKey), cloudSaves: cloud,
+                                                     gateNext: LauncherModel.gateNext())
         for note in notes { fputs(note + "\n", stderr) }
         switch start {
         case .show(let guide): presentLauncher(model, file, dir: dir, on: parent, startWith: guide ? .guide : nil, done: done); return true
@@ -985,6 +998,7 @@ public func dmShowLauncher(_ viewController: UnsafeMutableRawPointer, _ done: @c
 // The settings screen over parent; Play puts the settings into the environment, takes the screen away and calls done (front_ios.m starts the game)
 @MainActor private func presentLauncher(_ model: LauncherModel, _ file: SettingsFile, dir: URL?, on parent: UIViewController, startWith: LauncherShortcut? = nil, checkAtStart: Bool = false,
                                          welcomed: Bool = false, done: @escaping @convention(c) () -> Void) {
+    if !checkAtStart { LauncherModel.clearGateNext() }   // Exit and return to Gate asked for this showing: done (the cloud-save check's screen is no landing at the Gate)
     let content = LauncherContent.find(dir: dir, lang: model.values["DM_LANG"] ?? ProcessInfo.processInfo.environment["DM_LANG"])
     let artwork = LauncherArtwork.load(content)
     // The welcome (NX18Welcome.swift, gate-ui §21.1): on the first Gate of this app, before the Gate is built; not for the skipped start's cloud-save check, nor a shortcut's guide

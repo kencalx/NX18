@@ -140,13 +140,12 @@ private struct AddModFileSheet: View {
             if kind == .framerate { TextField("Frame rate", text: $variant) }
             TextField("Author (for the credit)", text: $author)
             Text("Beam checks that the file holds only patches for this game's build. Only frame-rate and Ultrawide mods are taken.").font(.caption).foregroundStyle(.secondary)
-            HStack {
-                Spacer()
-                Button("Cancel", role: .cancel) { dismiss() }
-                Button("Add") { add(kind, kind == .framerate ? variant : nil, author); dismiss() }.keyboardShortcut(.defaultAction)
-            }
         }
         .formStyle(.grouped)
+        .toolbar {   // the system places these under the form, Cancel then Add at the trailing edge, with Escape and Return (macOS 27 dialogs)
+            ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+            ToolbarItem(placement: .confirmationAction) { Button("Add") { add(kind, kind == .framerate ? variant : nil, author); dismiss() } }
+        }
         .frame(width: 420)
     }
 }

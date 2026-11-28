@@ -36,11 +36,15 @@ class LauncherStorageTests(unittest.TestCase):
             # the window's cloud-save check calls the host's save_sync_report, which the app links as save_sync.o (dm/mac/pack_app.py)
             compile_result = subprocess.run(['xcrun', '-sdk', 'macosx', 'clang', '-I', str(REPO / 'dm/host'), '-c', '-o', str(sync), str(REPO / 'dm/host/save_sync.c')], capture_output=True, text=True, timeout=300)
             self.assertEqual(compile_result.returncode, 0, compile_result.stdout + compile_result.stderr)
+            # and launcher.c's dm_mac_cloud_place (where the saves go), which has launcher.c's main beside it: a stand-in that says off
+            place = tmp / 'cloud_place.o'; (tmp / 'cloud_place.c').write_text('#include <stddef.h>\nint dm_mac_cloud_place(char *out, size_t n, int *missed) { if (n) out[0] = 0; if (missed) *missed = 0; return 0; }\n')
+            compile_result = subprocess.run(['xcrun', '-sdk', 'macosx', 'clang', '-c', '-o', str(place), str(tmp / 'cloud_place.c')], capture_output=True, text=True, timeout=300)
+            self.assertEqual(compile_result.returncode, 0, compile_result.stdout + compile_result.stderr)
             compile_result = subprocess.run(['xcrun', '-sdk', 'macosx', 'swiftc', '-swift-version', '6', '-parse-as-library', '-module-cache-path', str(tmp / 'module-cache'),
                             '-o', str(exe), str(REPO / 'dm/ios/Sources/LauncherSettings.swift'), str(REPO / 'dm/ios/Sources/LauncherRow.swift'), str(REPO / 'dm/ios/Sources/SaveSyncReport.swift'),
-                            str(REPO / 'dm/mac/Launcher.swift'), str(REPO / 'dm/ios/Sources/LauncherGuideFiles.swift'), str(REPO / 'dm/ios/Sources/NXFont.swift'),
-                            *[str(REPO / 'dm/ios/Sources' / n) for n in ['LauncherPanel.swift', 'LauncherFocus.swift', 'NX18Look.swift', 'NX18Glass.swift', 'NXButtonGlyph.swift', 'NXButtonGlyphData.swift', 'NX18Card.swift', 'NX18Profile.swift']],   # the Gate panel's files (pack_app.py swift_sources)
-                            str(Path(__file__).with_name('launcher_layout_check.swift')), str(Path(__file__).with_name('launcher_storage_check.swift')), str(sync)], capture_output=True, text=True, timeout=300)
+                            str(REPO / 'dm/mac/Launcher.swift'), str(REPO / 'dm/mac/MacFirstSync.swift'), str(REPO / 'dm/ios/Sources/LauncherGuideFiles.swift'), str(REPO / 'dm/ios/Sources/NXFont.swift'),
+                            *[str(REPO / 'dm/ios/Sources' / n) for n in ['LauncherPanel.swift', 'LauncherFocus.swift', 'NX18Look.swift', 'NX18Glass.swift', 'NXButtonGlyph.swift', 'NXButtonGlyphData.swift', 'NX18Card.swift', 'NX18Profile.swift', 'GameDocuments.swift']],   # the Gate panel's files (pack_app.py swift_sources)
+                            str(Path(__file__).with_name('launcher_layout_check.swift')), str(Path(__file__).with_name('launcher_storage_check.swift')), str(sync), str(place)], capture_output=True, text=True, timeout=300)
             self.assertEqual(compile_result.returncode, 0, compile_result.stdout + compile_result.stderr)
             r = subprocess.run([str(exe), str(tmp / 'launcher.json'), str(tmp / 'launcher_mac.json'), str(tmp / 'launcher_wonder.json'), str(tmp / 'launcher_sw2.json')], capture_output=True, text=True, timeout=60)
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)

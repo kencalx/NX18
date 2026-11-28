@@ -7,6 +7,7 @@
 // Nothing here goes to the network: every response carries a Content-Security-Policy that allows the guide's own scheme only (images, scripts, styles, fetch, media), a content
 // rule list blocks http(s), ws(s), ftp and file: loads besides (attached before the first page loads), and a navigation outside the guide is refused (the end is cancelled too,
 // never loaded). No UIKit or AppKit
+import Combine   // LauncherGuidePageModel
 import Foundation
 import WebKit
 
@@ -320,6 +321,7 @@ import WebKit
     }
     let root: URL
     let fontDir: URL?   // where nintendo_ext.ttf is when the environment names no font (the Mac app's Resources/dm/font: its launcher runs before launcher.c sets DM_FONT_DIR for the host)
+    var quiet = false   // a page of the player's own (GameDocumentsViewer.swift): no file names in the log
     init(root: URL, fontDir: URL? = nil) { self.root = root.standardizedFileURL.resolvingSymlinksInPath(); self.fontDir = fontDir }
 
     // The scheme's URL of a file under the folder; nil for one outside it
@@ -347,7 +349,7 @@ import WebKit
         guard let u = task.request.url else { task.didFailWithError(URLError(.badURL)); return }
         let f = file(for: u)
         let data = f.flatMap { try? Data(contentsOf: $0) }
-        if data == nil { fputs("launcher: the guide asked for \(u.path), which it does not have\n", stderr) }
+        if data == nil && !quiet { fputs("launcher: the guide asked for \(u.path), which it does not have\n", stderr) }
         let headers = ["Content-Type": Self.mime(f?.pathExtension ?? ""), "Content-Length": String(data?.count ?? 0), "Content-Security-Policy": Self.policy]
         guard let r = HTTPURLResponse(url: u, statusCode: data != nil ? 200 : 404, httpVersion: "HTTP/1.1", headerFields: headers) else { task.didFailWithError(URLError(.cannotParseResponse)); return }
         task.didReceive(r)
@@ -368,5 +370,49 @@ import WebKit
     static func blockRules() async -> WKContentRuleList? {
         let rules = ["^https?:", "^wss?:", "^ftp:", "^file:"].map { #"{"trigger":{"url-filter":"\#($0)"},"action":{"type":"block"}}"# }
         return try? await WKContentRuleListStore.default()?.compileContentRuleList(forIdentifier: "nx18-guide-offline", encodedContentRuleList: "[" + rules.joined(separator: ",") + "]")
+    }
+}
+
+// The guide page shown (GuideViewer.swift on the iPhone and iPad, and the in-game viewer on both, GameDocumentsViewer.swift): the footer buttons it assigned and whether there is a page to go back to, and what the header, the edge swipe and the controller do to it
+@MainActor final class LauncherGuidePageModel: ObservableObject {
+    @Published var footer: Set<String> = []   // the page's nx.footer buttons ("B", "L", "R", ...)
+    @Published var canGoBack = false           // the web view has a previous page
+    weak var web: WKWebView?
+    var close: () -> Void = {}
+
+    var hasBack: Bool { canGoBack || footer.contains("B") }
+    // A footer button on the page: the page's own when it assigned it; B left to the viewer goes to the previous page, else closes the viewer
+    func press(_ button: String) {
+        guard let web else { if button == "B" { close() }; return }
+        web.evaluateJavaScript(LauncherGuideFiles.footerScript(button)) { [weak self, weak web] r, _ in
+            MainActor.assumeIsolated {
+                guard let self, button == "B", (r as? String) ?? "back" == "back" else { return }
+                if let web, web.canGoBack { web.goBack() } else { self.close() }
+            }
+        }
+    }
+    func back() { press("B") }
+    // An arrow key (37 left, 38 up, 39 right, 40 down) and A, as the console's controller gives them to the page
+    func key(_ code: Int) { web?.evaluateJavaScript("window.__nx18 && __nx18.key && __nx18.key(\(code))", completionHandler: nil) }
+    func pressA() { web?.evaluateJavaScript("window.__nx18 && __nx18.a && __nx18.a()", completionHandler: nil) }
+
+    // A controller event while the guide's page is shown (Launcher.swift handle): every button goes to the page
+    func handle(_ e: LauncherPadEvent) -> Bool {
+        switch e {
+        case .left: key(37)
+        case .up: key(38)
+        case .right: key(39)
+        case .down: key(40)
+        case .a: pressA()
+        case .b: back()
+        case .l: press("L")
+        case .r: press("R")
+        case .x: press("X")
+        case .y: press("Y")
+        case .plus: press("Plus")
+        case .minus: press("Minus")
+        case .zl, .zr: return false
+        }
+        return true
     }
 }

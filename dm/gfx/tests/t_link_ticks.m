@@ -88,6 +88,92 @@ static void acquire_lateness(void) {
     CHECK(line_end && !strcmp(line_end + 1, "0\t@late_ms\t1.250\n"), "a link wake 1.25 ms after the slot logs 1.250 ms");
     free(rows);
 }
+// The deferred acquire (DM_NVN_ACQ_DEFER; upstream c17a54984's cases, hand-ported, plus NX 18's arming, caps and frame step): once the game has waited on an acquire's sync on the CPU,
+// an acquire with a sync returns at once and the display link's wait is the first nvnSyncWait's on it, or the window's next acquire's when none came; a null sync keeps the
+// acquire's own wait; a frame cap is read when the wait runs. Ticks are counted per wait: one wait per frame in every case
+static uint64_t ticks_since(uint64_t t0) { return g_link_tick_n - t0; }
+static void deferred_acquire(void) {
+    g_link_mode = 1; nvn_present_config(60, 0);
+    win_t win = {.interval = 2, .ntex = 2}; NVNsync s; h_nvnSyncInitialize(&s, NULL); int idx = -1;
+    mtl_link_wait_ticks(1, 100000000ull);   // a tick wait now, so the next acquire's ticks count from here
+    uint64_t t0 = g_link_tick_n; unsigned w0;
+    CHECK(!g_acq_armed, "deferral not armed before the game waits on an acquire's sync");
+    h_nvnWindowAcquireTexture((NVNwindow *)&win, &s, &idx);
+    CHECK(ticks_since(t0) == 2 && ((sync_t *)&s)->fenced != 4, "not armed: the acquire takes its two ticks at interval 2 itself, as before");
+    CHECK(h_nvnSyncWait(&s, 0) == NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED && !g_acq_armed, "a poll (timeout 0) on the acquire's sync does not arm it");
+    sync_t other = {MAGIC('S', 'Y', 'N', 'C'), 2, 0}; h_nvnSyncWait((NVNsync *)&other, UINT64_MAX);
+    CHECK(!g_acq_armed, "a CPU wait on another sync does not arm it");
+    h_nvnSyncWait(&s, UINT64_MAX);
+    CHECK(g_acq_armed, "a CPU wait with a timeout on the acquire's sync arms it");
+    t0 = g_link_tick_n; w0 = test_waits;
+    CHECK(h_nvnWindowAcquireTexture((NVNwindow *)&win, &s, &idx) == NVN_WINDOW_ACQUIRE_TEXTURE_RESULT_SUCCESS && ticks_since(t0) == 0 && test_waits == w0, "armed: the acquire returns at once (no tick, no wait)");
+    CHECK(((sync_t *)&s)->fenced == 4 && win.pending_acq, "and its sync holds the deferred wait (fenced 4), as does the window");
+    CHECK(h_nvnSyncWait(&s, UINT64_MAX) == NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED && ticks_since(t0) == 2, "the game's nvnSyncWait takes the two ticks of interval 2");
+    t0 = g_link_tick_n; w0 = test_waits;
+    CHECK(h_nvnSyncWait(&s, 0) == NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED && ticks_since(t0) == 0 && test_waits == w0, "a second wait is signalled at once");
+    t0 = g_link_tick_n;
+    h_nvnWindowAcquireTexture((NVNwindow *)&win, &s, &idx);
+    CHECK(ticks_since(t0) == 0, "the next acquire finds the wait taken: nothing to run");
+    g_link_tick_n += 2; w0 = test_waits;
+    CHECK(h_nvnSyncWait(&s, UINT64_MAX) == NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED && test_waits == w0, "ticks already passed: the wait blocks on nothing");
+    // A game that waits on the sync only on the GPU (or not at all): the window's next acquire takes the wait, so each frame still waits once
+    t0 = g_link_tick_n; uint64_t dr = g_acq_drained;
+    h_nvnWindowAcquireTexture((NVNwindow *)&win, &s, &idx);
+    CHECK(ticks_since(t0) == 0, "an acquire no CPU wait follows takes no tick");
+    h_nvnWindowAcquireTexture((NVNwindow *)&win, &s, &idx);
+    CHECK(ticks_since(t0) == 2 && g_acq_drained == dr + 1, "the next acquire takes the first one's two ticks");
+    t0 = g_link_tick_n;
+    CHECK(h_nvnSyncWait(&s, UINT64_MAX) == NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED && ticks_since(t0) == 2, "and the second one's wait is its sync's");
+    // A poll or a short wait on a deferred acquire whose wait has not run runs it whole: what the acquire took before
+    t0 = g_link_tick_n;
+    h_nvnWindowAcquireTexture((NVNwindow *)&win, &s, &idx);
+    NVNsyncWaitResult r = h_nvnSyncWait(&s, 0);
+    CHECK(r == NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED && ticks_since(t0) == 2, "a poll on a deferred acquire not yet waited for takes its ticks and is satisfied");
+    // A null sync keeps the acquire's own wait while armed (nvnQueueAcquireTexture, NVN 53)
+    t0 = g_link_tick_n;
+    h_nvnWindowAcquireTexture((NVNwindow *)&win, NULL, &idx);
+    CHECK(ticks_since(t0) == 2 && !win.pending_acq, "armed, a null sync: the acquire waits its two ticks itself");
+    // A frame cap is read when the wait runs: the 30 fps cap (Battery Saver; the heat ladder's 30 fps hold takes the same present cap) still caps
+    setenv("DM_FPS_TARGET", "30", 1); g_present_cap = -1; g_link_mode = 2;
+    win.interval = 1; nvn_present_config(120, 1);
+    mtl_link_wait_ticks(1, 100000000ull); t0 = g_link_tick_n;
+    h_nvnWindowAcquireTexture((NVNwindow *)&win, &s, &idx);
+    CHECK(ticks_since(t0) == 0, "30 fps cap: the deferred acquire returns at once");
+    h_nvnSyncWait(&s, UINT64_MAX);
+    CHECK(ticks_since(t0) == 4, "30 fps cap: the game's wait takes four 120 Hz ticks");
+    setenv("DM_FPS_TARGET", "0", 1); g_present_cap = -1;
+    _Alignas(8) float state[10] = {30}; dm_fps_state = (uint8_t *)state;   // the host's frame step at 30 (a frame-step game's 30 fps)
+    mtl_link_wait_ticks(1, 100000000ull); t0 = g_link_tick_n;
+    h_nvnWindowAcquireTexture((NVNwindow *)&win, &s, &idx); h_nvnSyncWait(&s, UINT64_MAX);
+    CHECK(ticks_since(t0) == 4, "the 30 fps frame step: the deferred wait keeps two 60 Hz vsyncs");
+    dm_fps_state = NULL; g_link_mode = 1; nvn_present_config(60, 0); win.interval = 2;
+    // The window's finalize lets a deferred acquire go: a wait on its sync later is signalled without a tick
+    mtl_link_wait_ticks(1, 100000000ull); t0 = g_link_tick_n;
+    h_nvnWindowAcquireTexture((NVNwindow *)&win, &s, &idx);
+    h_nvnWindowFinalize((NVNwindow *)&win);
+    w0 = test_waits;
+    CHECK(!win.pending_acq && h_nvnSyncWait(&s, 0) == NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED && ticks_since(t0) == 0 && test_waits == w0, "after the window's finalize the sync is signalled without a wait");
+    // Fencing the sync again lets it go too; the window's next acquire still takes the wait
+    h_nvnWindowAcquireTexture((NVNwindow *)&win, &s, &idx);
+    nvn_sync_release((sync_t *)&s);
+    CHECK(((sync_t *)&s)->fenced == 0 && win.pending_acq, "a sync set again lets go of the deferred acquire; the window keeps it");
+    t0 = g_link_tick_n;
+    h_nvnWindowAcquireTexture((NVNwindow *)&win, NULL, &idx);
+    CHECK(ticks_since(t0) == 4, "and the window's next acquire takes its wait before its own: two frames, two waits");
+    h_nvnSyncFinalize(&s);
+    printf("deferred acquire: %llu deferred, %llu taken by the next acquire\n", (unsigned long long)g_acq_deferred, (unsigned long long)g_acq_drained);
+}
+// DM_NVN_ACQ_DEFER=0 (decided once per process: run as "t_link_ticks defer-off"): a CPU wait on the acquire's sync does not arm it, and the acquire keeps its wait
+static int defer_off_case(void) {
+    setenv("DM_RT", "0", 1); setenv("DM_PRESENT_SNAP", "0", 1); setenv("DM_FPS_TARGET", "0", 1); setenv("DM_NVN_ACQ_DEFER", "0", 1);
+    g_dm_present_link = 1; g_link = (CAMetalDisplayLink *)[NSObject new]; g_link_mode = 1; nvn_present_config(60, 0);
+    win_t win = {.interval = 2, .ntex = 2}; NVNsync s; h_nvnSyncInitialize(&s, NULL); int idx;
+    h_nvnWindowAcquireTexture((NVNwindow *)&win, &s, &idx); h_nvnSyncWait(&s, UINT64_MAX);
+    mtl_link_wait_ticks(1, 100000000ull); uint64_t t0 = g_link_tick_n;
+    h_nvnWindowAcquireTexture((NVNwindow *)&win, &s, &idx);
+    CHECK(!g_acq_armed && ticks_since(t0) == 2 && ((sync_t *)&s)->fenced != 4, "defer off: the acquire keeps its two ticks after a CPU wait on its sync");
+    printf("t_link_ticks defer-off: %d checks, %d failed\n", checks, failed); return failed != 0;
+}
 // Present snapshots (mtl_snap_on, fixed for the process: run as "t_link_ticks snap"): the acquire takes the display link's wait as without them, the ring slot wait only on top.
 // It used to wait for a free slot alone, and the link frees slots by dropping frames, so a game ran ahead of its present interval (Donkey Kong Bananza at the 30 fps cap: 43-65 fps).
 // While the link is stalled the slot time paces instead (no link wait)
@@ -100,6 +186,16 @@ static int snap_case(void) {
     g_stall_t0 = 1;
     acquire_ticks(60, 0, 2, 0, "snapshots with the link stalled: no link wait");
     g_stall_t0 = 0;
+    {   // the deferred acquire with snapshots (frame generation and present repeat turn them on): the game's wait takes the link's ticks as the acquire did
+        nvn_present_config(60, 0); win_t win = {.interval = 2, .ntex = 2}; NVNsync s; h_nvnSyncInitialize(&s, NULL); int idx;
+        atomic_store(&g_acq_armed, 1);
+        mtl_link_wait_ticks(1, 100000000ull); uint64_t t0 = g_link_tick_n;
+        h_nvnWindowAcquireTexture((NVNwindow *)&win, &s, &idx);
+        CHECK(ticks_since(t0) == 0, "snapshots: the deferred acquire returns at once");
+        h_nvnSyncWait(&s, UINT64_MAX);
+        CHECK(ticks_since(t0) == 2, "snapshots: the game's wait takes the two ticks of interval 2");
+        h_nvnWindowFinalize((NVNwindow *)&win); h_nvnSyncFinalize(&s);
+    }
     printf("t_link_ticks snap: %d checks, %d failed\n", checks, failed); return failed != 0;
 }
 // DM_FPS_HOLD=off at 120 fps (fstep_hold caches the setting once per process: run as "t_link_ticks hold-off"; upstream 0a554d79f):
@@ -115,6 +211,7 @@ static int hold_off_case(void) {
 int main(int argc, char **argv) { @autoreleasepool {
     if (argc > 1 && !strcmp(argv[1], "snap")) return snap_case();
     if (argc > 1 && !strcmp(argv[1], "hold-off")) return hold_off_case();
+    if (argc > 1 && !strcmp(argv[1], "defer-off")) return defer_off_case();
     setenv("DM_RT", "0", 1); setenv("DM_PRESENT_SNAP", "0", 1);
     // Test uncapped display pacing independently of the selected game's default.
     setenv("DM_FPS_TARGET", "0", 1);
@@ -205,8 +302,10 @@ int main(int argc, char **argv) { @autoreleasepool {
         CHECK(g_acq_blocks == b0, "present interval 0 waits for nothing and keeps its core");
     }
     acquire_lateness();
+    deferred_acquire();
     pid_t pid; int st = 1; extern char **environ;   // the snapshot and hold-off cases in processes of their own (mtl_snap_on and fstep_hold are decided once)
     CHECK(!posix_spawn(&pid, argv[0], NULL, NULL, (char *[]){argv[0], "snap", NULL}, environ) && waitpid(pid, &st, 0) == pid && WIFEXITED(st) && !WEXITSTATUS(st), "the snapshot cases pass");
     CHECK(!posix_spawn(&pid, argv[0], NULL, NULL, (char *[]){argv[0], "hold-off", NULL}, environ) && waitpid(pid, &st, 0) == pid && WIFEXITED(st) && !WEXITSTATUS(st), "the hold-off at 120 fps cases pass");
+    CHECK(!posix_spawn(&pid, argv[0], NULL, NULL, (char *[]){argv[0], "defer-off", NULL}, environ) && waitpid(pid, &st, 0) == pid && WIFEXITED(st) && !WEXITSTATUS(st), "the DM_NVN_ACQ_DEFER=0 case passes");
     printf("t_link_ticks: %d checks, %d failed\n", checks, failed); return failed != 0;
 } }

@@ -2,7 +2,8 @@
 // Each acts this time only and changes no saved choice: Skip this screen next time (launcher.skip) stays as it is. Opening the app from one (main.m's SceneDelegate hands over the scene's
 // connection options' item, before the root view controller appears and dmShowLauncher decides): Game starts the game at once with the saved choices, as Play or the skip would; Launcher
 // shows the settings screen; Guide shows it with the game guide open (the manual when the app has one instead, About this game when it has neither) and closing it leaves the player there.
-// main.m's program record (a game of several programs handing over) wins over everything, then DM_LAUNCHER from an env file or the launch, then a shortcut, then the player's skip (start).
+// main.m's program record (a game of several programs handing over) wins over everything, then the in-game menu's Exit and return to Gate (once), then DM_LAUNCHER from an env file
+// or the launch, then a shortcut, then the player's skip (start).
 // With cloud saves on (a folder picked in the settings screen's Cloud saves, or DM_SAVE_SYNC from an env file or the launch: cloudSavesOn), the two starts that skip the screen for the
 // player, the Game shortcut and Skip this screen next time, show it instead, already running the cloud-save check as if Play had been pressed (.check; Launcher.swift start): a save
 // that changed both here and in the cloud is the player's pick, not the newer file's, and a cloud save that did not come is said so. When the check finds nothing to ask (the saves
@@ -13,7 +14,7 @@
 // first save mount, save_sync.c ss_decide), and the program record's hand-over runs no check: the game's first program did, before the first save mount.
 // One chosen while the app runs (main.m's windowScene:performActionForShortcutItem:, dmShortcutPerform): on the settings screen Game plays, Launcher closes the guide, About or the folder
 // picker and stays, Guide opens the guide. Once the game runs the process cannot go back to the settings screen without a restart, so Game resumes the game, and Launcher and Guide open the
-// in-game menu, whose Settings screen at start brings the screen back at the next start. The guide is not shown over a running game: the in-game menu does not pause the game (nothing in the
+// in-game menu, whose Exit and return to Gate ends the game and shows the screen at the next start. The guide is not shown over a running game: the in-game menu does not pause the game (nothing in the
 // front end pauses it short of the app leaving the screen, front_ios.m front_ios_focus_event), so it would run on under the guide, and the guide's web view would add its memory beside the
 // game's. docs/settings.md, Home screen shortcuts; docs/frontends.md, Starting a game
 import Combine
@@ -74,15 +75,17 @@ enum LauncherShortcuts {
     // folder (cloudSavesOn), and the log lines to write before it (a shortcut that gives way, a cloud save not checked). In order:
     // - main.m's program record set DM_LAUNCHER=0 itself (no env file or the launch lists it, LauncherModel.launcherSetByEnv): a program of a game of several handing over starts
     //   without the screen, whatever else says, and with no cloud-save check (the first program's start had it, and the save is mounted already);
+    // - the in-game menu's Exit and return to Gate (gateNext, LauncherModel.gateNextKey): the screen, once, whatever the rest says (a Guide shortcut still opens the guide on it);
     // - DM_LAUNCHER from an env file or the launch: 0 skips the screen (with cloud saves on, a line says the cloud save was not checked), any other value shows it (a Guide shortcut
     //   then still opens the guide on it);
     // - a shortcut: Game skips the screen (with cloud saves on, the screen runs the save check and plays: .check), Launcher shows it, Guide shows it with the guide open;
     // - the player's Skip this screen next time (.playerSkip: a held controller button may still ask for the screen, and afterWait decides once it has been watched for), else the screen
-    nonisolated static func start(shortcut: LauncherShortcut?, environment: [String: String], skipChosen: Bool, cloudSaves: Bool) -> (start: LauncherStart, notes: [String]) {
+    nonisolated static func start(shortcut: LauncherShortcut?, environment: [String: String], skipChosen: Bool, cloudSaves: Bool, gateNext: Bool = false) -> (start: LauncherStart, notes: [String]) {
+        if let v = environment["DM_LAUNCHER"], !v.isEmpty, !LauncherModel.launcherSetByEnv(environment: environment) {
+            return (.skip("off (DM_LAUNCHER=0)"), shortcut.map { ["launcher: shortcut \($0.title) ignored: a program of this game hands over to another (main.m's program record), which starts without the settings screen"] } ?? [])
+        }
+        if gateNext { return (.show(guide: shortcut == .guide), ["launcher: shown after Exit and return to Gate (this time only)"]) }
         if let v = environment["DM_LAUNCHER"], !v.isEmpty {
-            guard LauncherModel.launcherSetByEnv(environment: environment) else {
-                return (.skip("off (DM_LAUNCHER=0)"), shortcut.map { ["launcher: shortcut \($0.title) ignored: a program of this game hands over to another (main.m's program record), which starts without the settings screen"] } ?? [])
-            }
             let shows = v != "0"
             var notes = shortcut.flatMap { s in (s != .game) == shows ? nil : "launcher: shortcut \(s.title) ignored: DM_LAUNCHER=\(v) from an env file or the launch decides" }.map { [$0] } ?? []
             if !shows && cloudSaves { notes.append(notChecked) }
@@ -109,7 +112,7 @@ enum LauncherShortcuts {
             return (.show(guide: late == .guide), "launcher: shown although skipped (\(held ? "a controller button held at start" : "shortcut \(late?.title ?? "")"))")
         }
         if cloudSaves { return (.check(late == .game ? "Skip this screen next time is on; shortcut Game" : "Skip this screen next time is on"), nil) }
-        return (.skip("skipped (Skip this screen next time; the in-game menu's Settings screen at start, or a controller button held at start, shows it again)"), nil)
+        return (.skip("skipped (Skip this screen next time; the in-game menu's Exit and return to Gate, or a controller button held at start, shows it again)"), nil)
     }
 
     // Whether the game syncs its save through a cloud folder, from DM_SAVE_SYNC as the game's first save mount will read it (dm_cloud_saves_env puts the picked folder there unless
@@ -137,7 +140,7 @@ enum LauncherShortcuts {
         switch s {
         case .game: fputs("launcher: shortcut Game: the game is running; it carries on\n", stderr)
         case .launcher:
-            fputs("launcher: shortcut Launcher: the game is running, and the settings screen shows only before it starts; the in-game menu opens (its Settings screen at start shows the screen at the next start)\n", stderr)
+            fputs("launcher: shortcut Launcher: the game is running, and the settings screen shows only before it starts; the in-game menu opens (its Exit and return to Gate ends the game and shows the screen at the next start)\n", stderr)
             openMenu()
         case .guide:
             fputs("launcher: shortcut Guide: the game is running, and the guide shows on the settings screen before it starts (the in-game menu does not pause the game); the in-game menu opens\n", stderr)

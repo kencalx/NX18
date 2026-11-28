@@ -25,6 +25,8 @@ bool dm_setting_held(const char *env);   // front_ios.m: the front end holds thi
 const char *dm_setting_held_value(const char *env);   // front_ios.m: the value it holds then (a static string: stretch), which the row ticks in place of the saved choice; NULL when not held
 const char *dm_setting_why(const char *env);   // front_ios.m: why this live setting does nothing at the moment, as the running game knows it (a static string), or NULL
 bool dm_setting_working(const char *env);   // front_ios.m: the running game says this live setting's choice took effect at the last present (MetalFX upscaled)
+void dm_exit_to_gate(void);   // front_ios.m: Exit and return to Gate, confirmed: the game ends as a program hand-over ends it, and the Gate shows at the next start (iOS only)
+bool dm_gamepad_panel_open_now(void);   // DmGamepad.m: NX 18's panel opens now (whatever DM_GAME_MENU says), for a document picked in the UIMenu; true once it shows (iPhone and iPad only)
 void dm_gamepad_menu_open(void);   // DmGamepad.m: the menu button shows and opens the in-game menu, as a tap on it does (a Launcher or Guide home screen shortcut while the game runs, LauncherShortcuts.swift)
 int dm_gamepad_touch_hidden(void);   // DmGamepad.m: 0 the touch controls are drawn, 1 hidden while a controller is connected, 2 the Tap layout draws none (main thread)
 // The cheats (dm/host/hle_cheats.c, as dm.h declares them) that GameMenu.swift's Cheats submenu lists and toggles: the file of this build in the cheats folder, Documents/cheats on the iPhone (main.m).

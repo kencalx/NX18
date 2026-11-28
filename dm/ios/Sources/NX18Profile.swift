@@ -354,3 +354,28 @@ public func dm_profile_env() {
     if Thread.isMainThread { MainActor.assumeIsolated { NX18Profile.shared.lookAtFolder() } }
     NX18Profile.applyEnv()
 }
+
+// Where a Mac game's cloud saves go (dm/mac/launcher.c dm_mac_cloud_place, the same rule; docs/frontends.md, The cloud saves folder): the NX 18 folder when the NX 18 card's
+// This game's saves says so (nx18.cloud = "shared"), or with no choice yet when the game has no own folder (cloudSaves.folder); else its own folder; else off. The NX 18
+// folder only when one is connected and there; the default only with the Profile and NX 18 folder switch on. NX 18 Beam reads a game's preferences with it (its Cloud saves door and game page)
+nonisolated enum NX18CloudSaves {
+    static let choiceKey = "nx18.cloud", folderKey = "cloudSaves.folder"
+    enum Place: Equatable, Sendable {
+        case off, own(String), nx18(String)
+        var folder: String? { switch self { case .off: nil; case .own(let f), .nx18(let f): f } }
+        var inNX18: Bool { if case .nx18 = self { true } else { false } }
+    }
+    /// own: the game's own folder (nil: never chosen; "": turned off, which the default respects); choice: nx18.cloud; nx18: the connected NX 18 folder when it is there.
+    /// The card's "shared" holds whatever the Profile switch says (as on the iPhone: the switch's Off moves the save first); the default needs the switch on
+    static func decide(own: String?, choice: String?, nx18: String?, profileOn: Bool) -> Place {
+        let shared = choice == "shared", dflt = !shared && choice != "own" && own == nil && profileOn
+        if let nx = nx18, !nx.isEmpty, shared || dflt { return .nx18(nx) }
+        return own.flatMap { $0.isEmpty ? nil : $0 }.map(Place.own) ?? .off
+    }
+    /// A game's preferences (its own UserDefaults, or another app's suite in Beam) and the Mac's connected NX 18 folder (nxnative/nx18-folder), checked to be there
+    static func place(_ d: UserDefaults, nx18: URL?) -> Place {
+        var dir: ObjCBool = false
+        let nx = nx18.flatMap { FileManager.default.fileExists(atPath: $0.path, isDirectory: &dir) && dir.boolValue ? $0.path : nil }
+        return decide(own: d.string(forKey: folderKey), choice: d.string(forKey: choiceKey), nx18: nx, profileOn: d.object(forKey: NX18Profile.switchKey) as? Bool ?? true)
+    }
+}

@@ -15,7 +15,8 @@ typedef struct nq_node {
     unsigned kind, mode, closed, waiting; volatile uint32_t *event; uint32_t value;   // event, mode, value: an NQ_EVENT node's wait
     struct nq_signal { volatile uint32_t *word; unsigned mode; uint32_t value; } *signals; unsigned nsignals, signals_cap;   // an NQ_COMMANDS node's GPU event signals in recorded order, issued at its completion (nq_event_issued)
     struct nq_signal signal0; uint64_t signal_set;   // signal0: the first signal, so a node of one signal (split mode) allocates no array (nq_pooled); signal_set: this node's mark in nq_signal_words (nq_signal_on)
-    uint64_t wait_fence, event_predecessor, wait_since; unsigned wait_kind, wait_said; const sync_t *sync_source; nq_receipt *receipt;   // wait_since, wait_said: a wait that holds the queue past 5 s is logged once
+    uint64_t wait_fence, event_predecessor, wait_since; unsigned wait_kind, wait_said, wait_present; const sync_t *sync_source; nq_receipt *receipt, *next_receipt;   // wait_since, wait_said: a wait that holds the queue past 5 s is logged once
+    // wait_present, next_receipt: a wait on a deferred acquire's sync (fenced 4, nq_snapshot_sync): receipt is the image's own last present, whose texture comes back first, next_receipt the present after it
     tex_t texture; double period; int crop[4];
 } nq_node;
 typedef struct nq_owned { struct nq_owned *next; unsigned kind; uint64_t data[]; } nq_owned;
@@ -161,8 +162,17 @@ static void nq_put(nq_receipt *r) {
     if(nq_pooled()) { os_unfair_lock_lock(&nq_pool_mu); if(nq_receipt_npool<NQ_POOL_MAX) { r->spare_next=nq_receipt_pool; nq_receipt_pool=r; nq_receipt_npool++; r=NULL; } os_unfair_lock_unlock(&nq_pool_mu); }
     free(r);
 }
-static void nq_set_sync(sync_t *s,nq_receipt *r) { if(s->fenced==3) nq_put((nq_receipt *)(uintptr_t)s->fence); r->refs++; s->fence=(uintptr_t)r; s->fenced=3; }
-void nvn_sync_release(sync_t *s) { pthread_mutex_lock(&nq_mu); if(s->fenced==3) nq_put((nq_receipt *)(uintptr_t)s->fence); s->fenced=0; s->fence=0; pthread_mutex_unlock(&nq_mu); }
+// What a sync holds goes before it is set again (nq_mu held): its receipt (fenced 3), or its reference to a deferred acquire (fenced 4, hle_nvn.c acq_defer_t), whose last reference gives
+// back the receipts the acquire still held
+static void nq_sync_drop(sync_t *s) {
+    if(s->fenced==3) nq_put((nq_receipt *)(uintptr_t)s->fence);
+    else if(s->fenced==4) { uint64_t tk,nx; acq_defer_unref_take((acq_defer_t *)(uintptr_t)s->fence,&tk,&nx); nq_put((nq_receipt *)(uintptr_t)tk); nq_put((nq_receipt *)(uintptr_t)nx); }
+}
+static void nq_set_sync(sync_t *s,nq_receipt *r) { nq_sync_drop(s); r->refs++; s->fence=(uintptr_t)r; s->fenced=3; }
+void nvn_sync_release(sync_t *s) { pthread_mutex_lock(&nq_mu); nq_sync_drop(s); s->fenced=0; s->fence=0; pthread_mutex_unlock(&nq_mu); }
+// A deferred acquire's sync (DM_NVN_ACQ_DEFER): the sync takes the reference the acquire made for it. nvn_sync_ref_acq: a reference of the caller's own, 0 when the sync no longer holds one
+void nvn_sync_set_acq(sync_t *s,uint64_t handle) { pthread_mutex_lock(&nq_mu); nq_sync_drop(s); s->fence=handle; s->fenced=4; pthread_mutex_unlock(&nq_mu); }
+uint64_t nvn_sync_ref_acq(const sync_t *s) { pthread_mutex_lock(&nq_mu); uint64_t h=s->fenced==4?s->fence:0; if(h) acq_defer_ref((acq_defer_t *)(uintptr_t)h); pthread_mutex_unlock(&nq_mu); return h; }
 static nq_queue *nq_get(queue_t *q) {
     nq_queue *p=nq_queues; while(p && p->serial!=q->serial) p=p->next;
     if(!p) { p=calloc(1,sizeof *p); if(!p) die("queue state allocation failed"); p->serial=q->serial; p->origin=q->origin_ll; p->next=nq_queues; nq_queues=p; }
@@ -172,6 +182,7 @@ static void nq_publish(nq_receipt *r,uint64_t fence) { r->fence=fence; r->publis
 static int nq_predicate(uint32_t current,unsigned mode,uint32_t target) { return mode==0 ? current==target : (uint32_t)(current-target)<0x80000000u; }
 static int nq_sync_encoded(const sync_t *s,uint64_t *fence) {
     if(s->fenced==3) { nq_receipt *r=(nq_receipt *)(uintptr_t)s->fence; if(!r->published) return 0; *fence=r->fence; return 1; }
+    if(s->fenced==4) { *fence=0; return 1; }   // a deferred acquire's handle is no fence (nvnSyncWait waits on it itself: hle_nvn.c acq_sync_wait)
     if(!s->fenced) return 0; *fence=s->fence; return 1;
 }
 void nvn_queue_gpu_progress(void) {
@@ -196,6 +207,15 @@ void nvn_event_publish_gpu(volatile uint32_t *word,unsigned mode,uint32_t value,
 static void nq_snapshot_sync(nq_node *n,const sync_t *s) {
     n->wait_kind=s->fenced; n->wait_fence=s->fence;
     if(s->fenced==3) { n->receipt=(nq_receipt *)(uintptr_t)s->fence; n->receipt->refs++; }
+    // A deferred acquire's sync (fenced 4, hle_nvn.c acq_defer_t; upstream c17a54984): while its wait has not run, the image's own last present is waited for here, its texture
+    // given back (wait_present, as the acquire's ticket wait did); then the GPU end of the present after it (next_receipt, DM_NVN_ACQ_NEXT), else the commits the deferred acquire
+    // holds (wait_fence: at the acquire, or when its wait ended if the game submitted nothing since), as the acquire's sync was. The display pacing stays on the CPU (nvnSyncWait, or the window's next acquire)
+    else if(s->fenced==4) {
+        uint64_t tk=0,nx=0,gf=0; acq_defer_snap((acq_defer_t *)(uintptr_t)s->fence,&tk,&nx,&gf);
+        n->wait_fence=gf;
+        if(tk) { n->receipt=(nq_receipt *)(uintptr_t)tk; n->receipt->refs++; n->wait_present=1; }
+        if(nx) { n->next_receipt=(nq_receipt *)(uintptr_t)nx; n->next_receipt->refs++; }
+    }
 }
 // The submit-cost probes run once per nvn_queue_submit and once per replayed COMMANDS or PRESENT node, so in split mode once per GPU event signal. By default a reading is one THREAD_BASIC_INFO
 // call on a port kept per thread (hle_nvn.c thr_times) plus thread_selfcounts: about 0.9 us a scope on an M4 Max. DM_NVN_SUBMIT_PROBES=full keeps the earlier reading, clock_gettime for the CPU
@@ -376,10 +396,11 @@ static void *nq_worker(void *unused) {
                         n->waiting=1; mapped_event_wait=1; continue; }
                 }
                 if(n->kind==NQ_SYNC) {
-                    if(n->receipt && !n->receipt->published) {
+                    nq_receipt *pending=n->receipt && !n->receipt->published ? n->receipt : n->next_receipt && !n->next_receipt->published ? n->next_receipt : NULL;
+                    if(pending) {
                         uint64_t t=now_ns(); if(!n->wait_since) n->wait_since=t;
                         else if(t-n->wait_since>5000000000ull && !n->wait_said) { static _Atomic int said; n->wait_said=1; if(atomic_fetch_add(&said,1)<8)
-                            LOG("[RED] queue %llu: a sync wait has held it %.1f s: the fence it waits for (receipt %p) is not published yet",(unsigned long long)q->serial,(t-n->wait_since)/1e9,(void *)n->receipt); }
+                            LOG("[RED] queue %llu: a sync wait has held it %.1f s: the fence it waits for (receipt %p) is not published yet",(unsigned long long)q->serial,(t-n->wait_since)/1e9,(void *)pending); }
                         continue; }
                     // Targets are immutable snapshots. One Metal queue orders an encoded producer before this continuation. A sync not yet fenced when the wait was submitted
                     // (wait_kind 0) is a snapshot of nothing to wait for, and the wait passes. Sparking! ZERO, on one NVN queue, waits on a sync before that queue's own first
@@ -396,13 +417,20 @@ static void *nq_worker(void *unused) {
         j->first=n->next; if(!j->first) j->last=NULL;
         // Round-robin ready queues: a continually fed independent producer cannot starve another queue.
         if(q->next) { nq_queue **link=&nq_queues; while(*link!=q) link=&(*link)->next; *link=q->next; nq_queue *tail=nq_queues; while(tail->next) tail=tail->next; tail->next=q; q->next=NULL; }
-        if(n->kind==NQ_SYNC || n->kind==NQ_EVENT) { uint64_t f=n->receipt?n->receipt->fence:n->wait_fence; if(f>q->physical) q->physical=f; }
+        uint64_t wait_phys=0, wait_copy=0;   // a deferred acquire's own last present: its texture comes back before what follows replays (nq_snapshot_sync)
+        if(n->kind==NQ_SYNC || n->kind==NQ_EVENT) {
+            uint64_t f=n->receipt?n->receipt->fence:n->wait_fence;
+            if(n->wait_present || n->next_receipt) { f=n->wait_fence; if(n->receipt && n->receipt->fence>f) f=n->receipt->fence; if(n->next_receipt && n->next_receipt->fence>f) f=n->next_receipt->fence; }
+            if(n->wait_present && n->receipt) { wait_phys=n->receipt->present; wait_copy=n->receipt->copy; }
+            if(f>q->physical) q->physical=f;
+        }
         if((n->kind==NQ_SYNC || n->kind==NQ_EVENT) && n->wait_since) q->wait_passed=guest_ns();   // the GPU could not start what follows before this either
         // What follows a wait may read what the game wrote before the wait passed, after its submit (a CPU write, then the event word it waits for): its writes' limit is then at least now
         if(n->kind==NQ_SYNC || n->kind==NQ_EVENT) q->wait_written=nvn_dirty_now();
         if(n->kind==NQ_FENCE) nq_publish(n->receipt,q->physical);
         uint64_t oldest=nq_oldest();   // this job is still at its queue's head
         pthread_mutex_unlock(&nq_mu);
+        if(wait_phys) mtl_present_wait_texture(wait_phys,wait_copy);   // as nvn_queue_present_wait: the present thread has taken it (a snapshot: its copy has run)
         uint64_t fence=0, present=0, copy=0;
         if(n->kind==NQ_COMMANDS || n->kind==NQ_PRESENT) {
             nq_sub_lock(1); void *pool=objc_autoreleasePoolPush();
@@ -432,7 +460,7 @@ static void *nq_worker(void *unused) {
         }
         pthread_mutex_lock(&nq_mu); if(n->kind==NQ_PRESENT) { q->present=present; q->copy=copy; j->receipt->present=present; j->receipt->copy=copy; }
         if(fence) { q->physical=fence; if(n->nsignals) { uint64_t t0=now_ns(); for(unsigned i=0;i<n->nsignals;i++) nq_event_issued(n->signals[i].word,fence,n->signals[i].mode,n->signals[i].value); atomic_fetch_add_explicit(&nq_stat_event_ns,now_ns()-t0,memory_order_relaxed); } }
-        if(n->receipt) nq_put(n->receipt); nq_node_free(n); pthread_cond_broadcast(&nq_cv); pthread_mutex_unlock(&nq_mu);
+        if(n->receipt) nq_put(n->receipt); if(n->next_receipt) nq_put(n->next_receipt); nq_node_free(n); pthread_cond_broadcast(&nq_cv); pthread_mutex_unlock(&nq_mu);
         uint64_t frames=nq_report_due(frame,&reported); if(frames) nq_report(frame,frames);
     }
     return NULL;
@@ -600,7 +628,7 @@ void nvn_queue_present_ref(uint64_t ticket) {
 }
 void nvn_sync_set_present(sync_t *s,uint64_t ticket) {
     nq_receipt *r=(nq_receipt *)(uintptr_t)ticket; pthread_mutex_lock(&nq_mu);
-    if(r->published) { if(s->fenced==3) nq_put((nq_receipt *)(uintptr_t)s->fence); s->fenced=2; s->fence=r->fence; }   // replayed: the GPU fence it ended at, waited as an acquire sync
+    if(r->published) { nq_sync_drop(s); s->fenced=2; s->fence=r->fence; }   // replayed: the GPU fence it ended at, waited as an acquire sync
     else nq_set_sync(s,r);   // not yet: SyncWait and QueueWaitSync wait for its replay first, then its fence
     pthread_mutex_unlock(&nq_mu);
 }
@@ -613,7 +641,7 @@ void nvn_queue_present_wait(uint64_t ticket) {
 }
 void nvn_queue_fence(queue_t *q,sync_t *s) {
     pthread_mutex_lock(&nq_mu); nq_queue *p=nq_get(q);
-    if(p->tail) nq_set_sync(s,p->tail); else { if(s->fenced==3) nq_put((nq_receipt *)(uintptr_t)s->fence); s->fenced=1; s->fence=p->physical; }
+    if(p->tail) nq_set_sync(s,p->tail); else { nq_sync_drop(s); s->fenced=1; s->fence=p->physical; }
     pthread_mutex_unlock(&nq_mu);
 }
 int nvn_sync_wait(const sync_t *s,uint64_t timeout) {

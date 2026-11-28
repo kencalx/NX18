@@ -16,6 +16,7 @@ import Observation
         lastUpdateCheck = defaults.object(forKey: "lastUpdateCheck") as? Date
         whatsNewSeen = defaults.string(forKey: "whatsNewSeen")
         icloudNX18Folder = defaults.url(forKey: "icloudNX18Folder")
+        myFilesInNX18 = defaults.bool(forKey: "myFilesInNX18")
     }
     var nx18Folder: URL { didSet { defaults.set(nx18Folder, forKey: "nx18Folder") } }
     var keys: URL? { didSet { defaults.set(keys, forKey: "keys") } }                    // prod.keys dumped from the player's own console, for NSPs
@@ -26,6 +27,7 @@ import Observation
     var updateChecks: Bool { didSet { defaults.set(updateChecks, forKey: "updateChecks") } }          // off until the player turns it on (the welcome screen asks)
     var lastUpdateCheck: Date? { didSet { defaults.set(lastUpdateCheck, forKey: "lastUpdateCheck") } }
     var icloudNX18Folder: URL? { didSet { defaults.set(icloudNX18Folder, forKey: "icloudNX18Folder") } }   // an earlier Beam's own NX 18 folder for the Album: ProfileSetup.unify makes it the Mac's connected folder (one choice) and clears it
+    var myFilesInNX18: Bool { didSet { defaults.set(myFilesInNX18, forKey: "myFilesInNX18") } }   // off until the player turns it on: each game's My files in the NX 18 folder (MyFilesPlace.swift)
     var whatsNewSeen: String? { didSet { defaults.set(whatsNewSeen, forKey: "whatsNewSeen") } }      // the Beam version whose What's new was shown   // nil: the Apple account in Xcode; "cert:<certificate SHA-1>|<profile UUID>": a certificate   // the Xcode team iPhone installs sign with (kept, never shown)
     /// The chosen team among those in Xcode, else Xcode's first (a paid team before a Personal Team)
     var team: XcodeTeam? { let all = XcodeTeam.inXcode(); return all.first { $0.id == teamID } ?? all.first }

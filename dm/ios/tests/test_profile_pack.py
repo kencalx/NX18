@@ -131,5 +131,57 @@ class ProfilePackTests(unittest.TestCase):
                 self.assertEqual(archive.read('Payload/DmIOS.app/p1/romfs/marker'), b'romfs 1')
 
 
+    def test_the_profile_seed_goes_into_the_ipa(self):
+        # NX 18 Beam's IPA for other install tools carries the player's Profile (DM_PROFILE_SEED, the NSP script's --profile-seed) as DmIOS.app/NX18ProfileSeed, packed before
+        # the zip is closed (the install tool signs it later). Without a seed, or with a folder that holds no profile.stamp, the IPA has none, and a seed an earlier build left in
+        # the app folder never rides along
+        gid = '01007EF00011E000'
+        for case in ('seed', 'none', 'no stamp'):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                dm = root / 'dm'; header = dm / 'host/gen' / gid / 'game_profile.h'; header.parent.mkdir(parents=True)
+                header.write_text(game.header(game.Game(REPO / 'dm/games' / gid)))
+                app, shaders, romfs, seed = root / 'DmIOS.app', root / 'shaders/b-fixture', root / 'romfs', root / 'beam seed/NX18ProfileSeed'
+                for folder in (app / 'NX18ProfileSeed', shaders, romfs, seed): folder.mkdir(parents=True)
+                for name in ('fixture_b.metallib', 'fixture_bp.metallib', 'fixture_b.json'): (shaders / name).write_text(name)
+                (app / 'executable').write_text('app'); (app / 'NX18ProfileSeed/name.txt').write_text('Stale\n')
+                (romfs / 'marker').write_text('romfs')
+                (seed / 'name.txt').write_text('Kiki\n'); (seed / 'picture.jpg').write_bytes(b'\xff\xd8jpeg')
+                if case != 'no stamp': (seed / 'profile.stamp').write_text('5 beammac\n')
+                (root / 'tools').symlink_to(REPO / 'dm/ios/tools', target_is_directory=True)
+                out = root / 'fixture.ipa'
+                env = {k: v for k, v in os.environ.items() if k not in ('IOS_PULL', 'DM_GAMES_DIR', 'DM_GAMES_FIRST', 'DM_PROFILE_SEED', 'PSO', 'DM_COPY_ROMFS')}
+                env.update(GAME=gid, DM=str(dm), APP=str(app), MSL_IOS=str(shaders.parent), MSLDIR='b-fixture', AOC='', ROMFS=str(romfs), OUT_IPA=str(out),
+                           PROFILE_TOOL=str(REPO / 'dm/games/game.py'))
+                if case != 'none': env['DM_PROFILE_SEED'] = str(seed)
+                script = (REPO / 'dm/ios/tools/build_ipa.sh').read_text()
+                packing = script[script.index('\nP=Payload/DmIOS.app\n'):]
+                r = subprocess.run(['/bin/bash', '-c', 'set -u\nt() { echo "$*"; }; die() { echo "$*" >&2; exit 1; }\n'
+                                    'gp() { python3 "$PROFILE_TOOL" "$GAME" "$1"; }\n' + packing], cwd=root, env=env, capture_output=True, text=True)
+                self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                self.assertNotIn('Kiki', r.stdout + r.stderr, 'the name is never logged')
+                with zipfile.ZipFile(out) as archive:
+                    names = set(archive.namelist())
+                    seeded = {n for n in names if n.startswith('Payload/DmIOS.app/NX18ProfileSeed/') and not n.endswith('/')}
+                    if case == 'seed':
+                        self.assertEqual(seeded, {f'Payload/DmIOS.app/NX18ProfileSeed/{n}' for n in ('name.txt', 'picture.jpg', 'profile.stamp')})
+                        self.assertEqual(archive.read('Payload/DmIOS.app/NX18ProfileSeed/name.txt'), b'Kiki\n')
+                        self.assertEqual(archive.read('Payload/DmIOS.app/NX18ProfileSeed/profile.stamp'), b'5 beammac\n')
+                    else:
+                        self.assertEqual(seeded, set(), 'no seed: none in the IPA, not even the app folder\'s stale one')
+                        self.assertNotIn('Payload/DmIOS.app/NX18ProfileSeed/', names)
+                    self.assertIn('Payload/DmIOS.app/executable', names)
+
+    def test_the_nsp_script_hands_its_profile_seed_to_the_ipa_only(self):
+        # --profile-seed becomes build_ipa.sh's DM_PROFILE_SEED for the IPA; the Xcode route takes the seed at xcodebuild, a Mac app reads the Mac's Profile itself
+        s = (REPO / 'scripts/build_ipa_from_nsp.py').read_text()
+        self.assertIn("ap.add_argument('--profile-seed'", s)
+        self.assertIn("ipa_env['DM_PROFILE_SEED'] = str(profile_seed)", s)
+        check = s[s.index('    profile_seed = '):]; check = check[:check.index('\n    if manual:')]
+        self.assertIn('(mac or prepare_xcode): raise BuildError', check)
+        self.assertIn("'profile.stamp').is_file(): raise BuildError", check)
+        self.assertNotIn('{profile_seed}', check, 'the error never names the seed folder')
+
+
 if __name__ == '__main__':
     unittest.main()

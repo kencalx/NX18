@@ -2,7 +2,7 @@ import UIKit
 import XCTest
 @testable import DuoHarness
 
-// The settings screen's pieces that need no screen (Launcher.swift, LauncherController.swift, LauncherArt.swift) and the in-game menu's Settings screen at start
+// The settings screen's pieces that need no screen (Launcher.swift, LauncherController.swift, LauncherArt.swift) and the in-game menu's Exit and return to Gate
 // (GameMenu.swift): the controller's focus moves, the guide found in an app's offline pages in the game language, about.json read leniently, and the skip choice
 final class DuoLauncherTests: XCTestCase {
     func testFocusMapMovesByLineAndColumn() {
@@ -109,24 +109,21 @@ final class DuoLauncherTests: XCTestCase {
     }
 
     @MainActor
-    func testInGameMenuTurnsTheSkipOff() throws {
-        let suite = "DuoLauncherTests"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
-        defaults.removePersistentDomain(forName: suite)
-        defer { defaults.removePersistentDomain(forName: suite) }
+    func testInGameMenuExitAsksFirst() throws {
         let s = try JSONDecoder().decode(SettingsFile.self, from: Data(#"{"settings": [{"env": "DM_SHOW_FPS", "kind": "toggle", "label": "Vitals", "note": "", "default": "0"}]}"#.utf8))
-        let m = LauncherModel(s.settings, defaults: defaults)
-        m.skipAtStart = true
-        XCTAssertTrue(defaults.bool(forKey: LauncherModel.skipKey))
-        let row = try XCTUnwrap(uiMenuElement(settingsAtStartRow(m)) as? UIAction)   // as the UIMenu shows it (DM_GAME_MENU=system)
-        XCTAssertEqual(row.title, "Gate at start", "The row's name (gate-ui GW28)")
-        XCTAssertEqual(row.state, .off, "Skipped: not ticked")
-        XCTAssertTrue(LauncherModel.skipsAtStart(defaults: defaults, environment: [:]))
-        m.skipAtStart = false   // what the row's action does
-        XCTAssertEqual((uiMenuElement(settingsAtStartRow(m)) as? UIAction)?.state, .on)
-        XCTAssertTrue(settingsAtStartRow(m).isOn, "and as the panel shows it")
-        XCTAssertNil(defaults.object(forKey: LauncherModel.skipKey), "Off is no key")
-        XCTAssertFalse(LauncherModel.skipsAtStart(defaults: defaults, environment: [:]))
+        let m = LauncherModel(s.settings, defaults: try XCTUnwrap(UserDefaults(suiteName: "DuoLauncherTests")))
+        let row = settingsAtStartRow(m)
+        XCTAssertEqual(row.id, GameMenuExit.rowID)
+        XCTAssertEqual(row.title, "Exit and return to Gate", "The row's name (the owner, 2026-11-27; it was Gate at start)")
+        XCTAssertEqual(row.subtitle, "Ends the game; unsaved progress is lost")
+        guard case .submenu(let page) = row.kind else { return XCTFail("The row opens its confirmation, it does not exit") }
+        let items = page.flatMap(\.items)
+        XCTAssertEqual(items.map(\.title), ["Exit to Gate", "Keep Playing"])
+        XCTAssertEqual(items.map(\.id), [GameMenuExit.yesID, GameMenuExit.noID])
+        XCTAssertTrue(items[0].closesMenu, "Exit to Gate closes the panel first")
+        XCTAssertNil(items[1].perform, "Keep Playing does nothing but go back")
+        let menu = try XCTUnwrap(uiMenuElement(row) as? UIMenu)   // as the UIMenu shows it (DM_GAME_MENU=system): a submenu of the two
+        XCTAssertEqual(menu.children.map(\.title), ["Exit to Gate", "Keep Playing"])
     }
 
     // The cloud-save report's pull=<0|1> (save_sync.h): with a download of the cloud's save left unfinished nothing is asked, even beside conflict=1, and a line

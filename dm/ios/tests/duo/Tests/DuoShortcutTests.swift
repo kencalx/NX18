@@ -47,6 +47,25 @@ final class DuoShortcutTests: XCTestCase {
             XCTAssertEqual(r.notes.count, 1)
             XCTAssertTrue(r.notes.first?.contains("program record") ?? false, "\(s): \(r.notes)")
         }
+        // Exit and return to Gate (gateNext): the screen, once, over the player's skip, the Game shortcut, cloud saves and DM_LAUNCHER from an env file; not over the program record
+        for (s, env) in [(nil, none), (LauncherShortcut.game, none), (nil, envOff)] as [(LauncherShortcut?, [String: String])] {
+            let r = LauncherShortcuts.start(shortcut: s, environment: env, skipChosen: true, cloudSaves: true, gateNext: true)
+            XCTAssertEqual(r.start, .show(guide: false), "\(String(describing: s)) \(env)")
+            XCTAssertEqual(r.notes, ["launcher: shown after Exit and return to Gate (this time only)"])
+        }
+        XCTAssertEqual(LauncherShortcuts.start(shortcut: .guide, environment: none, skipChosen: true, cloudSaves: false, gateNext: true).start, .show(guide: true), "A Guide shortcut still opens the guide on it")
+        XCTAssertEqual(LauncherShortcuts.start(shortcut: nil, environment: record, skipChosen: false, cloudSaves: false, gateNext: true).start, .skip("off (DM_LAUNCHER=0)"))
+        // The key: set by the exit, read at the start, taken away as the Gate shows
+        let suite = "DuoShortcutTests.gateNext"
+        let defaults = try! XCTUnwrap(UserDefaults(suiteName: suite))
+        defaults.removePersistentDomain(forName: suite)
+        defer { defaults.removePersistentDomain(forName: suite) }
+        XCTAssertFalse(LauncherModel.gateNext(defaults: defaults))
+        defaults.set(true, forKey: LauncherModel.gateNextKey)
+        XCTAssertTrue(LauncherModel.gateNext(defaults: defaults))
+        LauncherModel.clearGateNext(defaults: defaults)
+        XCTAssertFalse(LauncherModel.gateNext(defaults: defaults))
+        XCTAssertNil(defaults.object(forKey: LauncherModel.gateNextKey), "Once only")
     }
 
     @MainActor

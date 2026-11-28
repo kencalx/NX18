@@ -2,13 +2,14 @@
 // Three folders feed it, all read in place (Beam copies nothing):
 //   · the iCloud NX 18 folder's <title ID>/Captures: what an iPhone or iPad game app files there with This game's captures on NX 18 folder (DmCapture.m)
 //   · the Mac app's own ~/Library/Application Support/nxnative/<title ID>/Captures (front_capture.h; DM_ROOT)
-//   · Beam's My Files/<title ID> (guides, maps): the documents
-// A file iCloud has not brought down yet is a placeholder (.<name>.icloud): it is listed as downloading, and Beam asks iCloud for it
+//   · Beam's My Files/<title ID> (guides, maps): the documents, or the NX 18 folder's <title ID>/Documents with Keep My files in the NX 18 folder on (MyFilesPlace.swift)
+// A file iCloud has not brought down yet is a placeholder (.<name>.icloud): it is listed as downloading, and Beam asks iCloud for it only when the player opens it
+// (Album.fetch), so a large Album is not pulled down just by looking at it
 import Foundation
 
 struct AlbumItem: Identifiable, Hashable, Sendable {
     enum Kind: Sendable { case screenshot, recording, document }
-    enum Place: String, Sendable { case iCloud = "iCloud Drive", mac = "This Mac", myFiles = "My files" }
+    enum Place: String, Sendable { case iCloud = "iCloud Drive", mac = "This Mac", myFiles = "My files", nx18 = "NX 18 folder" }   // nx18: My files kept in the NX 18 folder (MyFilesPlace.swift)
     let url: URL            // the file (for a placeholder, the name it will have)
     let kind: Kind
     let place: Place
@@ -46,8 +47,8 @@ enum Album {
         return out
     }
 
-    /// Everything, newest first: captures from both folders, then nothing hidden, AppleDouble or partly written (.part); placeholders asked for (download: false in tests)
-    static func items(titleID: String, nx18: URL?, myFiles: URL?, home: URL = FileManager.default.homeDirectoryForCurrentUser, download: Bool = true) -> [AlbumItem] {
+    /// Everything, newest first: captures from both folders, then nothing hidden, AppleDouble or partly written (.part); placeholders listed, asked for only with download
+    static func items(titleID: String, nx18: URL?, myFiles: URL?, home: URL = FileManager.default.homeDirectoryForCurrentUser, download: Bool = false) -> [AlbumItem] {
         var out: [AlbumItem] = []
         for (dir, place) in capturesFolders(titleID: titleID, nx18: nx18, home: home) { out += read(dir, place: place, captures: true, download: download) }
         if let myFiles { out += read(myFiles, place: .myFiles, captures: false, download: download) }

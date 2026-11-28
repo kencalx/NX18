@@ -2,6 +2,8 @@
 // Without DM_WINDOW: the guest runs directly on the current thread, behaving the same as with no front end (windowless tests use this), with the task role a focused app has (front_role.h).
 // The window is fullscreen-capable (the green button and ⌃⌘F); DM_FULLSCREEN=1 starts it that way. ⌘Q quits, and so does a controller's Home button held for 2 s and
 // confirmed with A (home_quit.h); the left mouse button is the touchscreen.
+// The in-game menu (dm/mac/GameMenuMac.swift, the iPhone's panel over the game): a short press of the controller's Home, Escape, or the app menu's Game Menu… (⌘,) opens it;
+// the settings the running game takes at once (dm_setting_live), the presets, Cheats and More. The game keeps running and its input waits while it is up (game_menu_input.h).
 // Cheats (hle_cheats.c): the Cheats menu's rows toggle, reload (⌘R) and open the cheats folder; its first item "Show Cheats
 // Window" (⌘⇧C, or DM_CHEATS_WINDOW=1 at launch) opens a Cheats panel beside the game: sections, search, the master switch,
 // safe mode, values, details and the import of cheat files (see the code below).
@@ -34,6 +36,9 @@ static void (*g_merge_sink)(const dm_haptic_state *);   // DM_PAD_MERGE: where p
 static void merge_rumble_to(void (*sink)(const dm_haptic_state *));
 #include "home_quit.h"
 #include "home_quit_mac.h"
+#include "game_menu_input.h"   // the in-game menu's input (gm_*)
+#include "front_setting.h"     // its rows' notes from the present (dm_setting_why)
+#include "hle_haptics.h"       // dm_haptics_set_enabled: Game rumble from the menu
 #include "ctrl_prompt.h"
 #include <signal.h>
 #include <math.h>
@@ -193,6 +198,10 @@ static int fn_shortcut(NSEvent *e) {
 }
 static ctrl_prompt g_cp; static int g_cp_confirm, g_cp_cancel;   // the controller applet's prompt (front_ctrl_support) and a key pressed in it since its last step
 static int cp_poll(void);
+static gm_phase g_gm;   // the in-game menu (below, gm_open): while it is up, and until nothing is held after it, the controllers and the keyboard are its
+static void gm_pad(int p, uint64_t m, int32_t lx, int32_t ly);
+static int gm_key_event(NSEvent *e, int down);
+static void gm_release(void);
 static void on_key(NSEvent *e, int down) {
     if (!g_input_on) return;
     unsigned short c = e.keyCode;
@@ -200,6 +209,7 @@ static void on_key(NSEvent *e, int down) {
         if (down && g_cp.phase == CP_OPEN) { if (c == 53 || c == 40) g_cp_cancel = 1; else if (c == 36 || c == 38) g_cp_confirm = 1; cp_poll(); }
         return;
     }
+    if (gm_key_event(e, down)) return;   // the in-game menu's keys, or Escape opening it
     switch (c) { case 13: g_w = down; break; case 0: g_a = down; break; case 1: g_s = down; break; case 2: g_d = down; break; }
     // An arrow key pressed with Shift held is the right stick until it is released; without Shift, the D-pad. The keyboard had no right stick: a 3D game's camera
     // could be turned only with a controller (Donkey Kong Bananza)
@@ -223,6 +233,7 @@ static int g_merge, g_kbd_own;
 static int32_t pad_axis(float v) { return (int32_t)(fmaxf(-1.f, fminf(1.f, v)) * DM_STICK_MAX); }
 // A controller's state for player p, GameController or raw HID: a pressed button or a stick past 15% hides the pointer (cursor_hide_for_input), a resting stick's drift does not
 static void pad_set(int p, uint64_t m, int32_t lx, int32_t ly, int32_t rx, int32_t ry) {
+    if (gm_blocks_input(g_gm)) { gm_pad(p, m, lx, ly); return; }   // the in-game menu has the controllers: none of it reaches the game
     const int32_t dead = DM_STICK_MAX * 15 / 100;
     if (m || abs(lx) > dead || abs(ly) > dead || abs(rx) > dead || abs(ry) > dead) cursor_hide_for_input();
     dm_pad_set_player(p, m, lx, ly, rx, ry);
@@ -284,6 +295,7 @@ static void mac_capture(void) {   // main thread
     if (!front_capture_screenshot(^(NSString *path, BOOL ok) { (void)path; mac_capture_notice(ok ? @"Screenshot saved" : @"Couldn't save the screenshot"); }))
         LOG("capture: a screenshot is still being saved, or the Captures folder cannot be made");
 }
+void dm_mac_capture(void) { mac_capture(); }   // the in-game menu's Take Screenshot (GameMenu.swift macMoreRows), once the panel has gone
 // Home and Capture: without this macOS takes them as system gestures (Home opens the Games app). Capture takes a screenshot (mac_capture), Home quits when it is held (hq_poll).
 // macOS 27 respects the claim when the Home button setting for apps lets the app decide (hq_log_setting names it in the log)
 // A controller without Share may have its capture under another name (a phone-clip or third-party pad's screenshot button): any other button macOS ties to a system gesture
@@ -419,6 +431,7 @@ static void input_release(void) {
     [NSCursor setHiddenUntilMouseMoves:NO];
     display_awake(0);
     g_input_on = 0;
+    gm_release();   // the in-game menu stays up; what was held for it is let go (no key-up comes to a window that is not key)
     dm_motion_pro_active(0); hidpad_motion_clear();
     dm_switch2_active(0); dm_jc1_active(0);
     g_btn = 0; g_w = g_a = g_s = g_d = 0; g_rl = g_ru = g_rr = g_rd = 0; push();
@@ -577,11 +590,12 @@ static NSView *g_hq_hold, *g_hq_prompt; static CAShapeLayer *g_hq_ring;
 static char g_hq_text[HQ_TEXTS][256];
 static void hq_start(void) {
     g_hq_on = hq_enabled(getenv("DM_HOME_QUIT"));
+    g_hq.no_quit = !g_hq_on;   // a press still opens the in-game menu
     char title[256]; snprintf(title, sizeof title, "Quit %s?", DM_GAME_NAME);
     const char *def[HQ_TEXTS] = {"Keep holding to quit", title, "Unsaved progress will be lost.", "Quit", "Cancel"};
     const char *text = getenv("DM_HOME_QUIT_TEXT");   // a front end's, in the player's language: one line per text, in home_quit.h's order
     for (int i = 0; i < HQ_TEXTS; i++) hq_text_line(text, i, def[i], g_hq_text[i], sizeof g_hq_text[i]);
-    LOG("front end: hold the Home button to quit %s", g_hq_on ? "is on" : "is off (DM_HOME_QUIT=0)");
+    LOG("front end: hold the Home button to quit %s; a short press opens the in-game menu", g_hq_on ? "is on" : "is off (DM_HOME_QUIT=0)");
 }
 // The Home button setting for apps, once, when the first controller is there (GameController reads it only while one is connected): "system" in the log
 // explains a hold that does nothing, since the system keeps Home whatever the host asks. A front end reads the setting itself (GCControllerHomeButtonSettingsManager)
@@ -644,13 +658,19 @@ static void hq_changed(hq_phase was, hq_phase now, GCController *holder) {
         break;
     }
 }
+static void gm_toggle(const char *by);
 static void hq_poll(void) {
-    static int busy; if (!g_hq_on || !g_win || busy) return;
+    static int busy; if (!g_win || busy) return;
     busy = 1;
     int home, a, b; GCController *holder = nil; hq_buttons(&home, &a, &b, &holder);
+    if (gm_blocks_input(g_gm)) {   // the in-game menu is up (or settling): a new press of Home closes it, and no hold begins under it
+        if (home && !g_hq.home && g_gm == GM_OPEN) gm_toggle("Home");
+        g_hq.home = home; busy = 0; return;
+    }
     double now = CACurrentMediaTime();
     hq_phase was = g_hq.phase, ph = hq_step(&g_hq, now, home, a, b);
     if (ph != was) hq_changed(was, ph, holder);
+    if (hq_take_tap(&g_hq)) { busy = 0; gm_toggle("Home"); return; }   // a short press: the in-game menu
     double fill = hq_ring(&g_hq, now);
     if (fill >= 0) {
         if (!g_hq_hold) { NSView *cv = g_win.contentView; CAShapeLayer *ring = nil; g_hq_hold = hq_hold_view(cv.bounds, @(g_hq_text[HQ_TEXT_HOLD]), &ring); g_hq_ring = ring; [cv addSubview:g_hq_hold]; hq_fade(g_hq_hold, 1); }
@@ -728,6 +748,118 @@ int front_ctrl_support(int min, int max) {
     dispatch_semaphore_wait(done, DISPATCH_TIME_FOREVER);
     return g_cp_ok;
 }
+// ---------- The in-game menu: the iPhone's panel over the game (dm/mac/GameMenuMac.swift builds and draws it; GameMenu.swift's rows) ----------
+// It opens with a short press of the controller's Home (hq_poll: a hold still quits), Escape (GM_OPEN_KEY, which the game's key map leaves free) and the app menu's Game Menu… (⌘,),
+// and closes with Home and Game Menu… again, its own B, + and Close, or a click beside it. The game keeps running under it, as on the iPhone, and gets no controller, keyboard or
+// mouse input meanwhile (pad_set, on_key): each controller's buttons and left stick, and the keys, are handed to the panel as GM_* bits whenever they change (game_menu_input.h),
+// so nothing polls while it is shut or open. Once it closes the game reads its controllers again only when nothing is held (GM_SETTLE), so the press that closed it never reaches
+// the game. The log says when it opens and closes (dm_front_menu_set, which also marks the frames made under it). The rows the game takes at once apply through dm_setting_live below
+bool dm_mac_game_menu_open(void *view, uint32_t held);   // GameMenuMac.swift
+void dm_mac_game_menu_close(void);
+void dm_mac_game_menu_input(uint32_t bits);
+static uint32_t g_gm_pad[DM_PLAYERS], g_gm_keys;   // each player's controller and the keyboard, as the panel reads them
+static uint32_t gm_held(void) { uint32_t b = g_gm_keys; for (int p = 0; p < DM_PLAYERS; p++) b |= g_gm_pad[p]; return b; }
+static void gm_changed(void) {   // an input changed while the menu has the input
+    uint32_t held = gm_held();
+    if (g_gm == GM_OPEN) { dm_mac_game_menu_input(held); return; }
+    if ((g_gm = gm_settle(g_gm, held)) == GM_CLOSED) pads_reread();   // nothing held: the game reads each controller as it is now
+}
+static void gm_pad(int p, uint64_t m, int32_t lx, int32_t ly) {
+    if (p < 0 || p >= DM_PLAYERS) return;
+    uint32_t b = gm_bits(m, lx, ly);
+    if (b == g_gm_pad[p]) return;
+    g_gm_pad[p] = b; gm_changed();
+}
+static void gm_release(void) {
+    if (g_gm == GM_CLOSED) return;
+    memset(g_gm_pad, 0, sizeof g_gm_pad); g_gm_keys = 0;
+    gm_changed();
+}
+static void gm_open(const char *by) {
+    if (g_gm == GM_OPEN || !g_win || !g_input_on || cp_blocks_input(g_cp.phase) || hq_blocks_input(g_hq.phase)) return;
+    g_btn = 0; g_w = g_a = g_s = g_d = 0; g_rl = g_ru = g_rr = g_rd = 0; push();   // nothing the game held stays pressed under the menu
+    if (g_mouse_down) { g_mouse_down = 0; dm_touch_set(NULL, 0); }
+    pads_release();
+    g_gm = GM_OPEN; memset(g_gm_pad, 0, sizeof g_gm_pad); g_gm_keys = 0;
+    pads_reread();   // each controller as it is now, into the menu's bits: a button held at the opening counts once it was let go
+    if (!dm_mac_game_menu_open((__bridge void *)g_win.contentView, gm_held())) { g_gm = GM_CLOSED; pads_reread(); return; }
+    dm_front_menu_set(1, by);
+}
+static void gm_toggle(const char *by) { if (g_gm == GM_OPEN) dm_mac_game_menu_close(); else if (g_gm == GM_CLOSED) gm_open(by); }
+// GameMenuMac.swift: the panel closed (its B, +, Close, a click beside it, Home, Game Menu…, a row that closes it first): the game has its input once nothing is held
+void dm_gamepad_panel_closed(void) {
+    if (g_gm != GM_OPEN) return;
+    g_gm = GM_SETTLE; dm_front_menu_set(0, "game menu");
+    gm_changed();
+}
+// A key while the menu has the keyboard (its moves: gm_key), or Escape opening it; 1 when it took the key. A key that was down when the menu opened is let go into nothing
+static int gm_key_event(NSEvent *e, int down) {
+    if (g_gm == GM_CLOSED) {
+        if (!down || e.keyCode != GM_OPEN_KEY) return 0;
+        gm_open("Escape"); return 1;
+    }
+    uint32_t b = gm_key(e.keyCode);
+    if (!b) return g_gm == GM_OPEN;   // a key the menu has no use for: nothing while it is up, the game's once it has closed
+    uint32_t was = g_gm_keys;
+    g_gm_keys = down ? (g_gm_keys | b) : (g_gm_keys & ~b);
+    if (g_gm_keys != was) gm_changed();
+    return 1;
+}
+@interface DmGameMenuTarget : NSObject @end
+@implementation DmGameMenuTarget
+- (void)gameMenu:(id)sender { (void)sender; gm_toggle("menu bar"); }   // the app menu's Game Menu… (⌘,)
+@end
+static DmGameMenuTarget *g_game_menu_target;
+// A controller GameController does not list is there (a raw HID pad, a Switch 2 pad, Joy-Cons read from HID): the panel shows its ring and button hints
+bool dm_mac_pads_any(void) { return g_hidpads || g_jc1_pads || dm_switch2_pads(); }
+
+// The in-game menu's picks go into the environment under one lock (dm_setting_env, from GameMenu.swift), and a host thread that reads one of those variables while the game runs
+// copies it under the same lock (front_env_copy, front.h), as on the iPhone (front_ios.m): DM_PRESENT_UPSCALE, DM_PRESENT_SHARPEN and DM_POST_AA on the present thread, DM_PRESET
+// and DM_FPS_CTL once a second (nvn_framegen.inc, hle_fctl.c). The others the Mac's menu sets are read on the main thread
+static pthread_mutex_t g_env_lock = PTHREAD_MUTEX_INITIALIZER;
+void dm_setting_env(const char *env, const char *value) { pthread_mutex_lock(&g_env_lock); setenv(env, value, 1); pthread_mutex_unlock(&g_env_lock); }
+int front_env_copy(const char *name, char *out, size_t cap) {
+    pthread_mutex_lock(&g_env_lock);
+    const char *e = getenv(name);
+    if (cap) strlcpy(out, e ? e : "", cap);
+    pthread_mutex_unlock(&g_env_lock);
+    return e != NULL;
+}
+void mtl_present_upscale_set(const char *mode);   // nvn_mtl.m: the present thread takes each at its next present
+void mtl_present_sharpen_set(const char *level);
+void mtl_present_aa_set(const char *mode);
+// The settings the Mac's in-game menu offers (GameMenu.swift), each taking effect while the game runs; the others wait for the next start, as the menu says. value NULL: only whether
+// env is one of them; otherwise apply it (the menu has saved it and put it in the environment, dm_setting_env). The iPhone's list (front_ios.m) less what the Mac has no row for
+// (Picture, Vitals, the touch controls, Low Power Mode's hold) and with Display mode, which enters or leaves full screen. Console mode changes as on a Switch put in or taken out
+// of its dock. Main thread
+bool dm_setting_live(const char *env, const char *value) {
+    if (!env || !g_win) return false;
+    if (!strcmp(env, "DM_OPMODE")) {
+        if (value) { int m = atoi(value) ? 1 : 0; dm_set_opmode(m); LOG("front end: console mode %s (in-game menu)", m ? "docked" : "handheld"); }
+        return true;
+    }
+    if (!strcmp(env, "DM_PRESENT_UPSCALE")) { if (value) { mtl_present_upscale_set(value); LOG("front end: upscaling %s (in-game menu)", value); } return true; }
+    if (!strcmp(env, "DM_PRESENT_SHARPEN")) { if (value) { mtl_present_sharpen_set(value); LOG("front end: sharpening %s (in-game menu)", value); } return true; }
+    if (!strcmp(env, "DM_POST_AA")) { if (value) { mtl_present_aa_set(value); LOG("front end: anti-aliasing %s (in-game menu)", value); } return true; }
+    if (!strcmp(env, "DM_RUMBLE")) { if (value) { dm_haptics_set_enabled(atoi(value) != 0); LOG("front end: game rumble %s (in-game menu)", atoi(value) ? "on" : "off"); } return true; }
+    if (!strcmp(env, "DM_FULLSCREEN")) {
+        if (value) {
+            int want = strcmp(value, "0") != 0, full = (g_win.styleMask & NSWindowStyleMaskFullScreen) != 0;
+            if (want != full) [g_win toggleFullScreen:nil];
+            LOG("front end: display mode %s (in-game menu)", want ? "fullscreen" : "window");
+        }
+        return true;
+    }
+    return false;
+}
+// Nothing the Mac's front end holds while the game runs (the iPhone's Picture under Ultrawide)
+bool dm_setting_held(const char *env) { (void)env; return false; }
+const char *dm_setting_held_value(const char *env) { (void)env; return NULL; }
+// Why a live setting does nothing at the moment, as only the running game knows it: the present's last outcome for Upscaling, Sharpening and Anti-aliasing (front_setting.h)
+const char *dm_setting_why(const char *env) { return g_win ? front_setting_present_why(env, mtl_present_fx_why(), mtl_present_sharp_why(), mtl_present_aa_why(), 0) : NULL; }
+// MetalFX upscaled at the last present: the menu leaves out the launcher's hint for the row
+bool dm_setting_working(const char *env) { return env && g_win && !strcmp(env, "DM_PRESENT_UPSCALE") && mtl_present_fx_why() == DM_FX_UPSCALED; }
+
 static void pads_start(void) {
     const char *e = getenv("DM_PAD_MERGE"); g_merge = e && atoi(e);
     e = getenv("DM_KBD_PLAYER"); g_kbd_own = !g_merge && e && !strcmp(e, "own");
@@ -1706,6 +1838,8 @@ void front_run(void (*guest)(void)) {
         // Main menu: AppKit runs ⌘ shortcuts only through menu items, so ⌘Q quits and ⌃⌘F toggles fullscreen from here (AppKit shows the item as Globe-F and keeps ⌃⌘F as a hidden twin)
         NSMenu *bar = [NSMenu new], *app = [NSMenu new], *wm = [[NSMenu alloc] initWithTitle:@"Window"];
         [[bar addItemWithTitle:@"" action:nil keyEquivalent:@""] setSubmenu:app];
+        [app addItemWithTitle:@"Game Menu…" action:@selector(gameMenu:) keyEquivalent:@","].target = g_game_menu_target = [DmGameMenuTarget new];   // ⌘,: the in-game menu (gm_toggle)
+        [app addItem:NSMenuItem.separatorItem];
         [app addItemWithTitle:@"Take Screenshot" action:@selector(takeScreenshot:) keyEquivalent:@"S"].target = g_capture_target = [DmCaptureTarget new];   // ⇧⌘S (the capital S adds Shift)
         [app addItem:NSMenuItem.separatorItem];
         [app addItemWithTitle:[@"Quit " stringByAppendingString:@(DM_GAME_NAME)] action:@selector(terminate:) keyEquivalent:@"q"];
@@ -1731,12 +1865,12 @@ void front_run(void (*guest)(void)) {
         stickMotion.state = dm_stick_motion_enabled() ? NSControlStateValueOn : NSControlStateValueOff;
         [[bar insertItemWithTitle:@"Controls" action:nil keyEquivalent:@"" atIndex:bar.numberOfItems - 1] setSubmenu:controls];
         NSApp.mainMenu = bar;
-        // The Mac's nearest to the iPhone's in-game menu is a menu of this menu bar (Cheats, Window) opened over the game: diagnostics only, the log says when one opens and closes
-        // ("front end: in-game menu open (menu bar)", hle_oe.c dm_front_menu_set) and the long-frame lines and 300-frame windows count the frames made while it was open
-        // (hle_nvn.c front_ui), so a hitch while the player read a menu is not taken for the game's. AppKit posts both notifications with the main menu as their object for
-        // any of its menus, on the main thread; a key equivalent (⌘R, ⌘Q) opens no menu and posts neither
-        [NSNotificationCenter.defaultCenter addObserverForName:NSMenuDidBeginTrackingNotification object:bar queue:nil usingBlock:^(NSNotification *n) { (void)n; dm_front_menu_set(1, "menu bar"); }];
-        [NSNotificationCenter.defaultCenter addObserverForName:NSMenuDidEndTrackingNotification object:bar queue:nil usingBlock:^(NSNotification *n) { (void)n; dm_front_menu_set(0, "menu bar"); }];
+        // A menu of this menu bar (Cheats, Window) opened over the game counts as a menu over the game too (the in-game menu itself is gm_open's): diagnostics only, the log says
+        // when one opens and closes ("front end: in-game menu open (menu bar)", hle_oe.c dm_front_menu_set) and the long-frame lines and 300-frame windows count the frames made
+        // while it was open (hle_nvn.c front_ui), so a hitch while the player read a menu is not taken for the game's. AppKit posts both notifications with the main menu as their
+        // object for any of its menus, on the main thread; a key equivalent (⌘R, ⌘Q) opens no menu and posts neither. Not while the in-game menu is up: its own open and close count
+        [NSNotificationCenter.defaultCenter addObserverForName:NSMenuDidBeginTrackingNotification object:bar queue:nil usingBlock:^(NSNotification *n) { (void)n; if (g_gm == GM_CLOSED) dm_front_menu_set(1, "menu bar"); }];
+        [NSNotificationCenter.defaultCenter addObserverForName:NSMenuDidEndTrackingNotification object:bar queue:nil usingBlock:^(NSNotification *n) { (void)n; if (g_gm == GM_CLOSED) dm_front_menu_set(0, "menu bar"); }];
         const char *fs = getenv("DM_FULLSCREEN");   // 1 (or any value but 0): start in fullscreen; 0, the settings window's Window, or unset: a window
         if (fs && strcmp(fs, "0")) {
             // A game opened from a fullscreen app starts while macOS leaves that Space. Wait for activation and for the window to reach the active Space before asking for fullscreen

@@ -6,6 +6,7 @@ struct GameDetailView: View {
     let gameID: UUID
     @State private var version: String?
     @State private var settingsSource: GameSettingsSource?
+    @State private var cloudPlace: NX18CloudSaves.Place?   // the Mac app's cloud saves, read when the page opens and after its settings close
 
     var body: some View {
         if let game = library.games.first(where: { $0.id == gameID }) {
@@ -22,8 +23,9 @@ struct GameDetailView: View {
                 .padding(28)
                 .frame(maxWidth: .infinity, alignment: .leading)   // the page fills the window, edge to edge with the padding
             }
-            .background { HomeBackdrop(game: game, subtle: true) }   // the game's art, faintly, behind its page
+            .background { HomeBackdrop(game: game, subtle: true).backgroundExtensionEffect() }   // the game's art, faintly, behind its page and on under the glass sidebar
             .navigationTitle(game.title)
+            .task(id: TaskKey(game: gameID, app: library.macApp(gameID), settingsOpen: settingsSource != nil)) { readCloud() }
             .sheet(isPresented: Binding(get: { settingsSource != nil }, set: { if !$0 { settingsSource = nil } })) {
                 if let s = settingsSource { GameSettingsView(title: game.title, source: s) }
             }
@@ -74,6 +76,9 @@ struct GameDetailView: View {
         }
     }
 
+    private struct TaskKey: Equatable { let game: UUID; let app: URL?; let settingsOpen: Bool }
+    private func readCloud() { cloudPlace = library.macApp(gameID).flatMap { NX18CloudSaves.place(app: $0) } }
+
     private func chosen(_ i: IdentifyEvent) -> String? { version == nil || version == i.packs ? nil : version }
 
     @ViewBuilder private func facts(_ i: IdentifyEvent) -> some View {
@@ -89,6 +94,7 @@ struct GameDetailView: View {
                 GridRow { Text("Profile").foregroundStyle(.secondary); Text(i.profile.map { $0 + (i.alias == true ? " (a regional release)" : "") } ?? "None (untested)") }
                 if !i.dlc.isEmpty { GridRow { Text("DLC").foregroundStyle(.secondary); Text("\(i.dlc.count)") } }
                 if i.programs.count > 1 { GridRow { Text("Programs").foregroundStyle(.secondary); Text(i.programs.joined(separator: ", ")).monospaced() } }
+                if let c = cloudPlace { GridRow { Text("Cloud saves").foregroundStyle(.secondary); Text(c.plainWords) } }   // the Mac app's: where its save lives
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(6)
@@ -96,15 +102,21 @@ struct GameDetailView: View {
         GroupBox("Versions") {
             VStack(alignment: .leading, spacing: 6) {
                 ForEach(i.versions.sorted { $0.number > $1.number }, id: \.version) { v in
-                    HStack {
-                        Image(systemName: (version ?? i.packs) == v.version ? "largecircle.fill.circle" : "circle").foregroundStyle(NX18Palette.coral)   // the one chosen: coral
-                        Text(v.display ?? v.version).frame(minWidth: 80, alignment: .leading)
-                        Text(v.build.map { "build \($0)" } ?? (v.note ?? "no code of its own")).monospaced().font(.callout).foregroundStyle(.secondary)
-                        Spacer()
-                        if v.registered == true { Text("Tested").font(.caption).foregroundStyle(NX18Palette.cyan) }
+                    let on = (version ?? i.packs) == v.version
+                    Button { version = v.version } label: {   // a button, so the keyboard and VoiceOver reach it as the mouse does
+                        HStack {
+                            Image(systemName: on ? "largecircle.fill.circle" : "circle").foregroundStyle(NX18Palette.coral)   // the one chosen: coral
+                            Text(v.display ?? v.version).frame(minWidth: 80, alignment: .leading)
+                            Text(v.build.map { "build \($0)" } ?? (v.note ?? "no code of its own")).monospaced().font(.callout).foregroundStyle(.secondary)
+                            Spacer()
+                            if v.registered == true { Text("Tested").font(.caption).foregroundStyle(NX18Palette.cyan) }
+                        }
+                        .contentShape(Rectangle())
                     }
-                    .contentShape(Rectangle())
-                    .onTapGesture { version = v.version }
+                    .buttonStyle(.plain)
+                    .accessibilityElement(children: .combine)
+                    .accessibilityAddTraits(on ? .isSelected : [])
+                    .accessibilityHint("Builds this version")
                 }
             }
             .padding(6)
@@ -118,6 +130,12 @@ struct GameDetailView: View {
                     .foregroundStyle(b.ok ? NX18Palette.cyan : NX18Palette.coral)
                 Text(b.date.formatted(date: .abbreviated, time: .shortened)).foregroundStyle(.secondary)
                 if let m = b.message { Text(m).textSelection(.enabled) }
+                if let r = library.rebuilds[gameID], !(library.jobs[gameID]?.isActive ?? false) {
+                    HStack(spacing: 10) {
+                        Label(r.text, systemImage: "arrow.triangle.2.circlepath").foregroundStyle(NX18Palette.coral)
+                        Button("Rebuild") { library.build(gameID, target: b.target, package: b.package) }
+                    }
+                }
                 if let out = b.output {
                     Button("Show in Finder", systemImage: "folder") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: out)]) }
                 }

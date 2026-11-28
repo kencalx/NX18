@@ -898,8 +898,31 @@ static ostream *os_of(const void *g) { ostream *o = objmap_get(g); if (!o) die("
 static void os_reclaim(ostream *o) {   // under o->m: the blocks the output played
     aout_buf *b; while ((b = h_au_Released(o->key))) { oblock *k = (oblock *)b; o->queued -= k->frames; o->nblk--; free(k); }
 }
+enum { VDEV_NAME = 0x100 };   // nn::audio::AudioDeviceName
+static const char VDEV_OUT[] = "AudioVirtualOutput";   // the host's one virtual output device, a name of the host's
 HLE_FORCE("_ZN2nn5audio29GetDefaultVirtualOutputDeviceEPNS0_15AudioDeviceNameE", "connect to auddmg:u; the host has one output: its name", void, h_os_DefaultDev, char *name) {
-    memset(name, 0, 0x100); strlcpy(name, "AudioVirtualOutput", 0x100);
+    memset(name, 0, VDEV_NAME); strlcpy(name, VDEV_OUT, VDEV_NAME);
+}
+// The list of virtual output devices, the twin of ListVirtualInputDevices below (the SDK's GetDefaultVirtualOutputDevice is a list of one through auddmg:u): the host's one device
+HLE_FORCE("_ZN2nn5audio24ListVirtualOutputDevicesEPNS0_15AudioDeviceNameEi", "connect to auddmg:u; the host has one output: its name", int, h_os_List, char *names, int n) {
+    if (n <= 0 || !names) return 0;
+    h_os_DefaultDev(names); return 1;
+}
+// nn::audio::VirtualDeviceProperties, 0x110 bytes, as audio::detail::GetVirtualOutputDeviceProperties fills it from the device manager's 0x228-byte profile (Nintendo Switch Sports
+// Resort's sdk+0x224cd4; the input and injection twins at sdk+0x1f6314 and sdk+0x1f4db4 do the same): the name asked about, the profile's +0x218 at +0x100 and its +0x108 at +0x108.
+// The profile's +0x218 is the shortest stream as a duration in ns: OutputStreamImpl::Open refuses a capacity under ceil(it x rate / 1e9) frames with 0x899 (sdk+0x225a94..0x225ad0,
+// InputStreamImpl::Open the same at sdk+0x1f6928). Nothing in the sdk reads the +0x108 word; its meaning is open, 0 here. Both of Sports Resort's callers (main+0x5eda90, main+0x7a0414)
+// and Donkey Kong Bananza's (main+0x57cadc, main+0x187cee4) only test the Result before opening a stream. Unhooked, the SDK connected to auddmg:u and aborted with 0xa99 (Sports Resort
+// sdk+0x224d1c; Super Mario Bros. Wonder's Switch 2 Edition, SDK 21.4.1, sdk+0x22100c, called from main+0x2298688 on its MovieOperateThread as the first movie's audio opens)
+#define OS_MIN_NS 10000000LL   // the host's AudioOut takes any block size and os_open sets no minimum: one 10 ms period, what Xenoblade Chronicles 2 and Star Fox write per block
+typedef struct { char name[VDEV_NAME]; int64_t min_ns; uint32_t word_108, pad; } vdev_props;
+_Static_assert(sizeof(vdev_props) == 0x110, "nn::audio::VirtualDeviceProperties is 0x110 bytes");
+HLE_FORCE("_ZN2nn5audio32GetVirtualOutputDevicePropertiesEPNS0_23VirtualDevicePropertiesERKNS0_15AudioDeviceNameE", "connect to auddmg:u; the host's one output device",
+          Result, h_os_Props, vdev_props *p, const char *name) {
+    if (strncmp(name, VDEV_OUT, VDEV_NAME)) { LOG("[RED] virtual output device %.64s: the host has only %s, no properties", name, VDEV_OUT); return RES_FAIL; }
+    memset(p, 0, sizeof *p); memcpy(p->name, name, sizeof p->name);
+    p->min_ns = OS_MIN_NS;
+    return RES_OK;
 }
 static Result os_open(void *g, void *ev, const int32_t *fmt, int frames, void *lr) {
     int f = fmt[0], ch = fmt[1], rate = fmt[2];
@@ -917,6 +940,12 @@ static Result os_open(void *g, void *ev, const int32_t *fmt, int frames, void *l
 HLE_FORCE("_ZN2nn5audio16OpenOutputStreamEPNS0_16OutputStreamTypeEPNS_2os11SystemEventEPvmRKNS0_15AudioDeviceNameERKNS0_12StreamFormatEiiNS_4util10BitFlagSetILi32ENS0_16OutputStreamFlagEEE",
           "connect to auddmg:u; an AudioOut of the host's", Result, h_os_Open, void *g, void *ev, void *buf, size_t size, const char *dev, const int32_t *fmt, int frames, int threshold, uint32_t flags) {
     (void)buf; (void)size; (void)dev; (void)threshold; (void)flags;
+    return os_open(g, ev, fmt, frames, __builtin_return_address(0));
+}
+// The overload without flags (Nintendo Switch Sports Resort, main+0x5edb34): the SDK's (sdk+0x224740) is the one above with no flags (sdk+0x225d10)
+HLE_FORCE("_ZN2nn5audio16OpenOutputStreamEPNS0_16OutputStreamTypeEPNS_2os11SystemEventEPvmRKNS0_15AudioDeviceNameERKNS0_12StreamFormatEii",
+          "connect to auddmg:u (no flags); an AudioOut of the host's", Result, h_os_OpenNoFlags, void *g, void *ev, void *buf, size_t size, const char *dev, const int32_t *fmt, int frames, int threshold) {
+    (void)buf; (void)size; (void)dev; (void)threshold;
     return os_open(g, ev, fmt, frames, __builtin_return_address(0));
 }
 HLE_FORCE("_ZN2nn5audio16OpenOutputStreamEPNS0_16OutputStreamTypeEPvmRKNS0_15AudioDeviceNameERKNS0_12StreamFormatEiNS_4util10BitFlagSetILi32ENS0_16OutputStreamFlagEEE",

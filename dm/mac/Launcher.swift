@@ -2,8 +2,8 @@
 // app's Resources/dm/launcher.json (dm/games/settings.py with SETTINGS_PLATFORM=mac); the model and the rows are the iOS launcher's (dm/ios/Sources/LauncherSettings.swift, LauncherRow.swift),
 // and so is the store: launcher.<VAR> in the app's preferences, which launcher.c reads when the window is not shown (docs/frontends.md, Saved choices). Below the banner is the iPhone's Gate
 // panel (LauncherPanel.swift, gate-ui §13): presets, quick tiles, Customize and Cloud saves, by pointer or keyboard. Play puts the settings into this process's environment,
-// which the host inherits; Quit and closing the window end the app without the game. Gate at start off ("window.show"): no window unless Option is held at launch, and launcher.c applies the
-// saved choices. The window never takes focus by itself: an app opened in the background (open -g) keeps its window behind until the player switches to it.
+// which the host inherits; Quit and closing the window end the app without the game. Gate at start off ("window.show"): no window unless Option is held at launch (or the in-game menu's Exit and
+// return to Gate asked for it once: MacGateStart), and launcher.c applies the saved choices. The window never takes focus by itself: an app opened in the background (open -g) keeps its window behind until the player switches to it.
 // The look is the NX 18 one the iOS launcher has (LauncherRow.swift's NX18Palette, NX18Look.swift's light and dark): the window follows Appearance, a banner across the top with the game's key art (Resources/dm/art.jpg; without it the app
 // icon blurred, with the icon itself on it), the game's logo (Resources/dm/logo.png) or else its name and the status line over it, the coral Play pill, Game guide (the game's own pages under Resources/html in a window of the app's own, MacGuideWindow, or
 // Resources/dm/manual.pdf) and About this game (Resources/dm/about.json, a sheet), the cyan-to-coral rails under the banner, the preset chips, cyan section headings and controls on
@@ -27,6 +27,16 @@ private func info(_ key: String) -> String? { Bundle.main.object(forInfoDictiona
 @_silgen_name("save_sync_report")
 private func save_sync_report(_ save: UnsafePointer<CChar>, _ title: UnsafePointer<CChar>, _ folder: UnsafePointer<CChar>?, _ waitMs: Int32,
                               _ out: UnsafeMutablePointer<CChar>, _ n: Int) -> Int32
+/// Moves this game's cloud save from one folder to another (save_sync.h; ss_move: 0 ask first, 1 replace, 2 use the one there). The NX 18 card's This game's saves (MacSavesFlow)
+@_silgen_name("save_sync_move")
+private func save_sync_move(_ save: UnsafePointer<CChar>, _ from: UnsafePointer<CChar>, _ to: UnsafePointer<CChar>, _ title: UnsafePointer<CChar>, _ how: UInt32, _ waitMs: Int32,
+                            _ out: UnsafeMutablePointer<CChar>, _ n: Int) -> Int32
+/// Whether the host's sync state (<save>.sync) names this folder's file: this Mac has synced the game through it (save_sync.h). The first-sync check's other record (FirstSyncGate)
+@_silgen_name("save_sync_synced")
+private func save_sync_synced(_ save: UnsafePointer<CChar>, _ title: UnsafePointer<CChar>, _ folder: UnsafePointer<CChar>) -> Int32
+/// launcher.c's choice of this game's cloud-save folder (the NX 18 folder or its own, NX18CloudSaves): 2 = the NX 18 folder, 1 = its own, 0 = off
+@_silgen_name("dm_mac_cloud_place")
+private func dm_mac_cloud_place(_ out: UnsafeMutablePointer<CChar>, _ n: Int, _ missed: UnsafeMutablePointer<Int32>?) -> Int32
 
 /// Cloud saves before Play: this Mac's save against the cloud's (SaveSyncReport, shared with the iPhone launcher), and the question it needs, as alerts.
 /// It runs with the window's Play and, with the window off, before dmMacLauncher returns; DM_LAUNCHER=0 asks nothing (the host takes the newer save).
@@ -38,8 +48,8 @@ enum SaveCheck {
         // getenv, not ProcessInfo.environment: launcher.c sets DM_SAVE and applies the env files in this process before the window
         guard let save = getenv("DM_SAVE") else { fputs("launcher: save sync: no DM_SAVE\n", stderr); return nil }
         guard let id = info("DMTitleID"), !id.isEmpty else { fputs("launcher: save sync: no DMTitleID\n", stderr); return nil }
-        // the folder as launcher.c will pass it (cloud_saves_folder): DM_SAVE_SYNC from the launch environment or an env file, else the window's choice; "0" = off
-        let folder = getenv("DM_SAVE_SYNC").map { String(cString: $0) } ?? (UserDefaults.standard.string(forKey: "cloudSaves.folder") ?? "")
+        // the folder as launcher.c will pass it (cloud_saves_folder): DM_SAVE_SYNC from the launch environment or an env file, else the NX 18 folder or this game's own; "0" = off
+        let folder = getenv("DM_SAVE_SYNC").map { String(cString: $0) } ?? (MacCloud.place().folder ?? "")
         let line = (folder.isEmpty ? "0" : folder).withCString { f in SaveSyncReport.run { save_sync_report(save, id, f, SaveSyncReport.waitMs, $0, $1) } }
         guard let line else { fputs("launcher: save sync: no report on \(String(cString: save))\n", stderr); return nil }
         fputs("launcher: save sync: \(line)\n", stderr)
@@ -92,6 +102,8 @@ enum SaveCheck {
 
     /// With the window off: the check and its question before the game, the app in front only while it asks. false: the player quit
     @MainActor static func withoutWindow() -> Bool {
+        guard FirstSyncGate.withoutWindow() else { return false }   // iCloud first, on a first sync through this folder
+        if let c = getenv("DM_SAVE_SYNC_CHOICE"), String(cString: c) == "hold" { return true }   // held: nothing to compare
         final class Box: @unchecked Sendable { let lock = NSLock(); var report: SaveSyncReport?; var waiting = false }
         let app = NSApplication.shared
         defer { app.setActivationPolicy(.prohibited) }
@@ -126,6 +138,112 @@ enum SaveCheck {
             case .cancel: return false
             }
         }
+    }
+}
+
+/// The first sync of this game through a folder on this Mac waits for iCloud (MacFirstSync.swift): Play runs it before the save check, the start without the window before its
+/// own, and launcher.c (dm_mac_first_sync) for DM_LAUNCHER=0, NX 18 Beam's Play; the card's move runs it for the folder it moves to. Held: DM_SAVE_SYNC_CHOICE=hold, which
+/// the host keeps to (save_sync.c: nothing brought in or sent this start). The log names no folder
+enum FirstSyncGate {
+    nonisolated(unsafe) static var settled = false   // this start's check ran (or none was needed): the main thread only
+    // The folder iCloud caught up with, recorded only once the game really starts through it (dm_mac_first_sync, just before the host) or the card's move has switched to it
+    // (commit): a Cancel at the save question, a Quit, or a move that did not go leaves no record, so the next start checks again. The main thread only
+    nonisolated(unsafe) static var pending: String?
+    static let checking = "Checking iCloud for this game's save…"
+    static let heldTitle = "Your save stays on this Mac for now"
+    static let heldText = "iCloud hasn't finished bringing this game's save from your other devices. This start keeps your save on this Mac; it syncs at a later start."
+
+    /// The check for a first sync through `folder` (nil: the one this start syncs through, as launcher.c passes it), or nil when none is needed: sync off, held already,
+    /// or this Mac has synced the game through that folder (the record, or the host's sync state)
+    static func prepare(folder given: String? = nil) -> FirstSyncCheck? {
+        pending = nil   // an earlier check's folder that never started or moved
+        if given == nil, let c = getenv("DM_SAVE_SYNC_CHOICE"), String(cString: c) == "hold" { return nil }
+        let folder = given ?? getenv("DM_SAVE_SYNC").map { String(cString: $0) } ?? (MacCloud.place().folder ?? "")
+        guard let id = info("DMTitleID"), !id.isEmpty, let paths = FirstSyncPaths(folder: folder, title: id) else { return nil }
+        let synced = getenv("DM_SAVE").map { save in folder.withCString { save_sync_synced(save, id, $0) == 1 } } ?? false
+        guard FirstSyncRecord.needed(folder: folder, recorded: UserDefaults.standard.string(forKey: FirstSyncRecord.key), hostSynced: synced) else { return nil }
+        fputs("launcher: first sync of this game through this folder on this Mac: checking iCloud for its save\n", stderr)
+        return FirstSyncCheck(paths: paths, cloud: ICloudLayer())
+    }
+    /// The check's end: the record to write once the start or the move goes (pending, commit), and the log line. true: go on to the start (and the save check); false: held or stopped
+    @discardableResult static func finish(_ o: FirstSyncOutcome, folder given: String? = nil) -> Bool {
+        switch o {
+        case .ready, .nothingThere:
+            let folder = given ?? getenv("DM_SAVE_SYNC").map { String(cString: $0) } ?? (MacCloud.place().folder ?? "")
+            pending = FirstSyncRecord.identity(folder)
+            fputs("launcher: first sync: \(o == .ready ? "iCloud has this game's save here" : "no save of this game in iCloud; this Mac's goes there")\n", stderr)
+            return true
+        case .held(let why): fputs("launcher: first sync not yet: \(why.log)\n", stderr); return false
+        case .cancelled: fputs("launcher: the iCloud check was stopped\n", stderr); return false
+        }
+    }
+    /// The record of the folder iCloud caught up with (finish), now that the game starts through it or the card's move has switched to it: later starts do not wait
+    static func commit() {
+        guard let id = pending else { return }
+        pending = nil
+        UserDefaults.standard.set(id, forKey: FirstSyncRecord.key)
+    }
+    /// This start plays from this Mac's save and sends nothing (save_sync.c CH_HOLD); the next start checks again
+    static func hold(_ why: FirstSyncHold) {
+        settled = true; pending = nil   // a held start records nothing: the next start checks again
+        SaveCheck.apply("hold")
+        fputs("launcher: this start's sync held (\(why.log)): the save stays on this Mac; the next start checks iCloud again\n", stderr)
+    }
+    /// The held start's notice. true: Play (held), false: back (`cancel`: "Cancel" to the window, "Quit" without one)
+    @MainActor static func tellHeld(_ why: FirstSyncHold, cancel: String) -> Bool {
+        let a = NSAlert()
+        a.messageText = heldTitle; a.informativeText = heldText
+        a.addButton(withTitle: "Play"); a.addButton(withTitle: cancel)
+        a.buttons[1].keyEquivalent = "\u{1b}"
+        guard a.runModal() == .alertFirstButtonReturn else { return false }
+        hold(why); return true
+    }
+    /// Without the window (Gate at start off, DM_LAUNCHER=0): the check, and an alert only once it has taken half a second (Play Anyway, Quit), the app in front only then.
+    /// false: the player quit
+    @MainActor static func withoutWindow() -> Bool {
+        if settled { return true }
+        guard let check = prepare() else { settled = true; return true }
+        final class Box: @unchecked Sendable { let lock = NSLock(); var outcome: FirstSyncOutcome?; var waiting = false }
+        let box = Box(), sem = DispatchSemaphore(value: 0)
+        var shown = false
+        defer { if shown { NSApplication.shared.setActivationPolicy(.prohibited) } }   // the host is the game's app from here on
+        DispatchQueue.global(qos: .userInitiated).async {
+            let o = check.run()
+            box.lock.lock(); box.outcome = o; box.lock.unlock()
+            sem.signal()
+            DispatchQueue.main.async { box.lock.lock(); let w = box.waiting; box.lock.unlock(); if w { NSApplication.shared.abortModal() } }
+        }
+        if sem.wait(timeout: .now() + 0.5) == .timedOut {
+            let app = NSApplication.shared
+            shown = true; app.setActivationPolicy(.regular); app.activate(ignoringOtherApps: true)
+            let a = NSAlert()
+            a.messageText = checking
+            a.informativeText = "This game syncs through this folder on this Mac for the first time."
+            a.addButton(withTitle: "Play Anyway"); a.addButton(withTitle: "Quit")
+            a.buttons[1].keyEquivalent = "\u{1b}"
+            box.lock.lock(); box.waiting = true; box.lock.unlock()
+            let answer = a.runModal()
+            box.lock.lock(); box.waiting = false; box.lock.unlock()
+            if answer == .alertFirstButtonReturn { check.cancel(); hold(.playAnyway); return true }
+            if answer == .alertSecondButtonReturn { check.cancel(); return false }
+            sem.wait()   // aborted: the outcome is in
+        }
+        box.lock.lock(); let o = box.outcome ?? .cancelled; box.lock.unlock()
+        if finish(o) { settled = true; return true }
+        guard case .held(let why) = o else { return false }
+        if !shown { shown = true; NSApplication.shared.setActivationPolicy(.regular); NSApplication.shared.activate(ignoringOtherApps: true) }
+        return tellHeld(why, cancel: "Quit")
+    }
+}
+
+// launcher.c, after it has put the folder into DM_SAVE_SYNC and before the host starts: the check for a start that ran none yet (DM_LAUNCHER=0, NX 18 Beam's Play; no launcher.json).
+// The game starts now, so the record of a check that caught up is written here (never on a held start). 1: start, 0: the player quit at its alert
+@_cdecl("dm_mac_first_sync")
+public func dmMacFirstSync() -> Int32 {
+    MainActor.assumeIsolated {
+        guard FirstSyncGate.withoutWindow() else { FirstSyncGate.pending = nil; return 0 }
+        FirstSyncGate.commit()
+        return 1
     }
 }
 
@@ -291,11 +409,15 @@ struct LauncherView: View {
     let extras: LauncherExtras
     @AppStorage("window.show") private var show = true
     @AppStorage("cloudSaves.folder") private var cloudFolder = ""
+    @AppStorage(NX18CloudSaves.choiceKey) private var cloudChoice = ""   // the NX 18 card's This game's saves: read so the door and the page follow it
+    @ObservedObject private var saves = MacSavesFlow.shared            // the move's progress and questions, on the card
     @State private var lastPlayed: Date?
     @State private var aboutShown = false
+    @State private var mine: [GameDocument] = []   // the player's own guides and maps in the NX 18 folder (Beam's Keep My files in the NX 18 folder; GameDocuments.swift): on the Manual pill
     @State private var bannerWidth: CGFloat = 600   // the banner's width, which bounds the logo's
     @State private var checking = false
     @State private var check = 0   // which Play the running check is for: one the player went on from without it is dropped
+    @State private var firstSync: FirstSyncCheck?   // Play's iCloud check on a first sync through this folder (FirstSyncGate), while it runs
     @State private var pages: [GatePage] = []         // the Gate panel's page stack (LauncherPanel.swift)
     @State private var focus: LauncherFocus?          // the keyboard's focus on the panel: nil until an arrow key moves it, again nil after a click
     @State private var cardOpen = false               // the NX 18 card (NX18Card.swift): the mark opens it
@@ -311,7 +433,7 @@ struct LauncherView: View {
     private var status: LauncherStatus {
         var s = LauncherStatus()
         s.lastPlayed = lastPlayed
-        s.cloud = CloudSavesSection.fixed.map { $0.isEmpty ? .off : .on } ?? (cloudFolder.isEmpty ? .off : .on)
+        s.cloud = cloudStatus
         s.console = m.console.flatMap(LauncherStatus.Console.init(rawValue:))
         return s
     }
@@ -322,11 +444,16 @@ struct LauncherView: View {
                 .environment(\.colorScheme, .dark)   // the banner stays dark in every look: art, name, status line, Play and the pills (§11a.2)
             NX18Rails(axis: .horizontal, flowing: true)   // one cycle, then still; an input runs one more (GW19, LauncherRow.swift)
             GatePanel(m: m, pages: $pages, focus: focus, padShown: focus != nil, quiet: cardOpen, glyphs: NXPadGlyphs(), status: cloudStatus,
-                      gateAtStartLocked: false, footer: AnyView(panelFooter), acknowledgements: MacNoticesWindow.url != nil,
+                      savesInNX18Folder: cloudPlace.inNX18, gateAtStartLocked: false, footer: AnyView(panelFooter), acknowledgements: MacNoticesWindow.url != nil,
                       touched: { _ in focus = nil; NX18RailsIdle.pulse() }, act: act)
                 .frame(maxHeight: .infinity)
             HStack {
-                if checking {
+                if checking, let first = firstSync {   // a first sync through this folder: iCloud first (Play Anyway holds this start's sync)
+                    ProgressView().controlSize(.small)
+                    Text(FirstSyncGate.checking).foregroundStyle(GateColor.muted)
+                    Button("Cancel") { checking = false; firstSync = nil; first.cancel() }.nxPushButton()
+                    Button("Play Anyway") { checking = false; firstSync = nil; first.cancel(); FirstSyncGate.hold(.playAnyway); done(true) }.nxPushButton()
+                } else if checking {
                     ProgressView().controlSize(.small)
                     Text("Checking the cloud save…").foregroundStyle(GateColor.muted)
                     Button("Play Without It") { checking = false; SaveCheck.apply("offline"); done(true) }.nxPushButton()
@@ -352,13 +479,19 @@ struct LauncherView: View {
         .sheet(isPresented: $aboutShown) {
             if let a = extras.about { AboutGameSheet(about: a, name: name, art: extras.art, tint: extras.tint) }
         }
+        .task {   // the player's documents, listed once as the window appears (the NX 18 folder's read is coordinated, off the main thread)
+            mine = await GameDocuments.load(manual: nil, guide: nil, guideRoot: nil, companion: nil, nx18: GameDocuments.macNX18Folder(), titleID: info("DMTitleID"))
+            if !mine.isEmpty { fputs(GameDocuments.summary(mine) + " (the window's Manual pill)\n", stderr) }
+        }
         .task {
             let folder = Self.saveFolder
             lastPlayed = await Task.detached(priority: .utility) { folder.flatMap { LauncherStatus.lastModified(under: $0) } }.value
         }
     }
 
-    private var cloudStatus: LauncherStatus.Cloud { (CloudSavesSection.fixed ?? cloudFolder).isEmpty ? .off : .on }
+    // Where this game's cloud saves go (launcher.c dm_mac_cloud_place); cloudFolder and cloudChoice are read so a change draws again
+    private var cloudPlace: NX18CloudSaves.Place { _ = (cloudFolder, cloudChoice, saves.changes); return MacCloud.place() }
+    private var cloudStatus: LauncherStatus.Cloud { cloudPlace == .off ? .off : .on }
     // The end of Customize: the game's and NX 18's versions (About this game carries the rest on the iPhone)
     private var panelFooter: some View {
         VStack(alignment: .leading, spacing: 2) {
@@ -370,8 +503,12 @@ struct LauncherView: View {
     // What a press on the panel asks the window for: the folder panel, and the questions before Turn off and Reset all settings (alerts: no console holds to confirm)
     private func act(_ a: GateAction) {
         switch a {
-        case .chooseCloudFolder: if let f = CloudSavesSection.choose(from: cloudFolder) { cloudFolder = f }
-        case .confirmCloudOff: if confirm("Turn off cloud saves?", "This Mac keeps its own save.", "Turn Off") { cloudFolder = "" }
+        case .chooseCloudFolder:   // in the NX 18 folder: the chosen folder becomes this game's own, and its save moves there (MacSavesFlow, as the card's Own folder)
+            if let f = CloudSavesSection.choose(from: cloudPlace.folder ?? cloudFolder) {
+                if cloudPlace.inNX18 && CloudSavesSection.fixed == nil { saves.chooseOwn(f) } else { cloudFolder = f }
+            }
+        case .confirmCloudOff:   // the NX 18 folder too: this game's own, which is none now
+            if confirm("Turn off cloud saves?", "This Mac keeps its own save.", "Turn Off") { cloudFolder = ""; if cloudPlace.inNX18 { cloudChoice = "own" } }
         case .confirmReset: if confirm("Reset all settings?", "Brings back the settings this game was tested with.", "Reset") { m.reset() }
         case .acknowledgements: MacNoticesWindow.show(title: name)
         }
@@ -543,9 +680,24 @@ struct LauncherView: View {
 
     /// Play, once the cloud's save is compared with this Mac's: a save that changed on both sides is the player's pick, not the newer file's (SaveCheck)
     private func start() {
+        if saves.busy != nil { NSSound.beep(); return }   // a move between the folders first: the game starts with the save where it is going
         setenv("DM_PLAY_AT", String(format: "%.6f", Date().timeIntervalSince1970), 1)   // Play: the start's timeline counts from here, the cloud-save check in it (dm/host/hle_lifecycle.c)
         check += 1; checking = true
         let mine = check
+        guard let first = FirstSyncGate.prepare() else { compare(mine); return }
+        firstSync = first   // the first sync of this game through this folder: iCloud has its save (or has none) before the two are compared
+        DispatchQueue.global(qos: .userInitiated).async {
+            let o = first.run()
+            DispatchQueue.main.async {
+                guard checking, check == mine else { return }   // Cancel or Play Anyway
+                firstSync = nil
+                if FirstSyncGate.finish(o) { FirstSyncGate.settled = true; compare(mine); return }
+                guard case .held(let why) = o, FirstSyncGate.tellHeld(why, cancel: "Cancel") else { checking = false; return }   // Cancel: back to the window
+                checking = false; done(true)   // held: nothing to compare
+            }
+        }
+    }
+    private func compare(_ mine: Int) {
         DispatchQueue.global(qos: .userInitiated).async {
             let r = SaveCheck.report()
             DispatchQueue.main.async {
@@ -578,7 +730,26 @@ struct LauncherView: View {
             if extras.hasGuide {
                 pill("Game guide", short: "Guide", icon: "book", label: l, help: "Opens the game's own guide in a window") { openGuide() }
             }
-            if let manual = extras.manual {
+            if !mine.isEmpty {   // the player's documents on the Manual pill's place, as a menu (no new pill): the manual first, then each document, opened as the manual is
+                Menu {
+                    if let manual = extras.manual {
+                        Button("Manual") { NSWorkspace.shared.open(manual) }
+                        Divider()
+                    }
+                    ForEach(mine) { d in Button(d.title) { openMine(d) } }
+                } label: {
+                    switch l {
+                    case .full: Label(extras.manual != nil ? "Manual & documents" : "My files", systemImage: "doc.richtext")
+                    case .short: Label(extras.manual != nil ? "Manual" : "Files", systemImage: "doc.richtext")
+                    case .icon: Image(systemName: "doc.richtext")
+                    }
+                }
+                .menuStyle(.button)
+                .menuIndicator(.hidden)
+                .buttonStyle(NX18PillStyle(glassTint: NX18Palette.charcoal.opacity(0.25), art: heroGlass))
+                .help("The game's manual and your own guides and maps from the NX 18 folder")
+                .accessibilityLabel(extras.manual != nil ? "Manual and documents" : "My files")
+            } else if let manual = extras.manual {
                 pill(extras.hasGuide ? "Manual" : "Game guide", short: extras.hasGuide ? "Manual" : "Guide", icon: "doc.richtext", label: l, help: "Opens the game's manual (PDF)") {
                     NSWorkspace.shared.open(manual)
                 }
@@ -618,6 +789,15 @@ struct LauncherView: View {
     }
 
 
+
+    // One of the player's documents in its own app (Preview, the browser ...), as the manual opens; one still in iCloud is downloaded first. The log says the kind only
+    private func openMine(_ d: GameDocument) {
+        Task {
+            guard let u = await GameDocuments.fetch(d) else { fputs("[RED] launcher: a document of the player's could not be read\n", stderr); return }
+            NSWorkspace.shared.open(u)
+            fputs("launcher: my files: a \(d.kind.rawValue)\n", stderr)
+        }
+    }
 
     // The guide in the game language the window shows (Game language, else the app's DMLanguage), in the guide window (MacGuideWindow), not a browser: one opening the pages from
     // file: URLs refuses their scripts' reads of the guide's other files and has no window.nx
@@ -950,11 +1130,19 @@ struct AboutGameSheet: View {
 
 /// Cloud saves: a folder the save is synced through (dm/host/save_sync.h), the one the iPhone or iPad app picks in its launcher's Cloud saves section. It is kept in this app's
 /// preferences as cloudSaves.folder, which launcher.c puts into DM_SAVE_SYNC before the host starts; a DM_SAVE_SYNC an env file or the launch environment set wins, and is shown here.
-// The Gate panel's Cloud saves page reads the chosen folder's name from here (LauncherPanel.swift)
+// The Gate panel's Cloud saves page reads the folder's name from here (LauncherPanel.swift): this game's own, or the NX 18 folder when its saves go there
 @MainActor enum MacCloud {
     static var folderName: String? {
-        let f = CloudSavesSection.fixed ?? UserDefaults.standard.string(forKey: "cloudSaves.folder") ?? ""
+        let f = CloudSavesSection.fixed ?? place().folder ?? ""
         return f.isEmpty ? nil : (f as NSString).lastPathComponent
+    }
+    /// Where this game's cloud saves go, as launcher.c will pass them; a DM_SAVE_SYNC the launch or an env file set is the own folder it names (or off)
+    nonisolated static func place() -> NX18CloudSaves.Place {
+        if let f = CloudSavesSection.fixed { return f.isEmpty || f == "0" ? .off : .own(f) }
+        var buf = [CChar](repeating: 0, count: Int(PATH_MAX) + 1)
+        let k = dm_mac_cloud_place(&buf, buf.count, nil)
+        let f = String(decoding: buf.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
+        return k == 2 ? .nx18(f) : k == 1 ? .own(f) : .off
     }
 }
 
@@ -1092,13 +1280,20 @@ public func dmMacPresetEnv() {
     }
 }
 
+// Whether the settings window shows at this start: Gate at start ("window.show", on when unset), Option held at launch, or the in-game menu's Exit and return to Gate (gateNext)
+enum MacGateStart {
+    nonisolated static func windowShows(windowShow: Bool?, optionHeld: Bool, gateNext: Bool) -> Bool { gateNext || optionHeld || windowShow != false }
+}
+
 // 1: Play (the window's settings are in the environment), 0: the player quit, 2: no window (no launcher.json, or "Show this window at launch" off): launcher.c applies the saved choices
 @_cdecl("dm_mac_launcher")
 public func dmMacLauncher() -> Int32 {
     MainActor.assumeIsolated {   // launcher.c calls it on the main thread, before the host starts; LauncherModel is main-actor state (dm/ios/Sources/LauncherSettings.swift)
+        let gateNext = LauncherModel.gateNext()   // the in-game menu's Exit and return to Gate: this start shows the window, once (launcher.c opened the app again for it)
+        LauncherModel.clearGateNext()
         guard let url = Bundle.main.resourceURL?.appendingPathComponent("dm/launcher.json"), let data = try? Data(contentsOf: url) else { return 2 }
         guard let file = try? JSONDecoder().decode(SettingsFile.self, from: data), !file.settings.isEmpty else { fputs("[RED] launcher: dm/launcher.json cannot be read; starting the game\n", stderr); return 2 }
-        if (UserDefaults.standard.object(forKey: "window.show") as? Bool) == false && !NSEvent.modifierFlags.contains(.option) {
+        if !MacGateStart.windowShows(windowShow: UserDefaults.standard.object(forKey: "window.show") as? Bool, optionHeld: NSEvent.modifierFlags.contains(.option), gateNext: gateNext) {
             fputs("launcher: settings window off (hold Option at launch to show it)\n", stderr)
             return SaveCheck.withoutWindow() ? 2 : 0
         }
@@ -1119,11 +1314,14 @@ public func dmMacLauncher() -> Int32 {
 }
 
 // The NX 18 card's Profile on the Mac (gate-ui §20.3, §20.5): ~/Library/Application Support/nxnative/Profile, shared by every NX 18 Mac app, which launcher.c hands the games
-// (DM_NICK, DM_PROFILE_IMAGE). The name in a small field; the picture from an image file, its centre square at 256 x 256; the NX 18 folder's path in nxnative/nx18-folder. This
-// game's saves stay on the Cloud saves page (no shared mode on the Mac yet)
+// (DM_NICK, DM_PROFILE_IMAGE). The name in a small field; the picture from an image file, its centre square at 256 x 256; the NX 18 folder's path in nxnative/nx18-folder.
+// This game's saves (NX 18 folder | Own folder) and its move: MacSavesFlow
 @MainActor enum MacProfileFlow {
     static var rows: NX18CardProfile {
-        NX18CardProfile(choosePicture: choosePicture, editName: editName, toggle: { NX18Profile.shared.enabled.toggle() }, chooseFolder: chooseFolder)
+        let f = MacSavesFlow.shared
+        let saves: (() -> Void)? = CloudSavesSection.fixed == nil ? { f.savesTapped() } : nil   // a DM_SAVE_SYNC the launch or an env file set decides: no choice here
+        return NX18CardProfile(busy: f.busy, note: f.note, shared: MacCloud.place().inNX18, choosePicture: choosePicture, editName: editName, toggle: { f.toggleProfile() },
+                               chooseFolder: chooseFolder, saves: saves)
     }
     static func editName() {
         let a = NSAlert(); a.messageText = "Name"; a.informativeText = NX18ProfileName.refusal
@@ -1154,5 +1352,133 @@ public func dmMacLauncher() -> Int32 {
         // the folder's Profile when it has a newer one, else this Mac's goes there
         if !NX18ProfileSync.pull(local: local, folder: url) { NX18ProfileSync.push(local: local, folder: url) }
         NX18Profile.shared.reload(); NX18Profile.shared.refreshFolderState()
+        MacSavesFlow.shared.enterShared()
+    }
+}
+
+// This game's saves on the Mac, as on the iPhone (NX18ProfileFlow.swift, gate-ui §21.4): NX 18 folder | Own folder (nx18.cloud, which launcher.c reads: dm_mac_cloud_place). A switch
+// with a save in the place it leaves moves it first (save_sync_move: copied, read back and compared; the old copy stays; a different save there is never replaced without asking,
+// and the one replaced goes into the save's backups). The questions are alerts, as the window's others. The Mac's iCloud Drive takes plain file reads and writes (save_sync.c's
+// own fetch and store, as the game's sync uses): a read of a file iCloud has only listed downloads it, within the move's wait
+@MainActor final class MacSavesFlow: ObservableObject {
+    static let shared = MacSavesFlow()
+    @Published var busy: String?     // "Moving your save…"
+    @Published var note: String?     // "Moved and checked.", "Could not move. Try again when online."
+    @Published var changes = 0       // bumps when the place changes, so the window draws the door again
+    private let defaults = UserDefaults.standard
+
+    private var own: String? { defaults.string(forKey: NX18CloudSaves.folderKey).flatMap { $0.isEmpty ? nil : $0 } }
+    // The connected NX 18 folder, when it is there (a folder iCloud Drive no longer has is never made again by a move)
+    private var nx18: String? {
+        if case .nx18(let f) = MacCloud.place() { return f }
+        var dir: ObjCBool = false
+        guard let f = NX18Profile.folderURL()?.path, FileManager.default.fileExists(atPath: f, isDirectory: &dir), dir.boolValue else { return nil }
+        return f
+    }
+    private func setShared(_ on: Bool) {
+        defaults.set(on ? "shared" : "own", forKey: NX18CloudSaves.choiceKey)
+        fputs("launcher: this game's cloud saves in \(on ? "the NX 18 folder" : "its own folder")\n", stderr)   // never a path
+        changes += 1
+    }
+
+    // The card's row: ‹ NX 18 folder | Own folder ›
+    func savesTapped() {
+        guard busy == nil else { return }
+        note = nil
+        if !MacCloud.place().inNX18 {
+            guard nx18 != nil else { note = "Your NX 18 folder cannot be reached now."; return }
+            if ask(toShared: true) { move(toShared: true) }
+            return
+        }
+        if own == nil { note = "Choose this game's own folder first, on the Cloud saves page."; return }
+        if ask(toShared: false) { move(toShared: false) }
+    }
+    // The Cloud saves page's folder pick while the saves are in the NX 18 folder: that folder becomes this game's own, and the save moves there (nothing asked first: the pick is the answer)
+    func chooseOwn(_ folder: String) {
+        guard busy == nil else { return }
+        defaults.set("shared", forKey: NX18CloudSaves.choiceKey)   // held while it moves: a new own folder must not change the default under it
+        defaults.set(folder, forKey: NX18CloudSaves.folderKey)
+        move(toShared: false)
+    }
+    // A folder connected on the card (MacProfileFlow.chooseFolder): this game's saves go there; an own folder's save is asked about once, as on the iPhone (§21.3)
+    func enterShared() {
+        guard CloudSavesSection.fixed == nil, !MacCloud.place().inNX18 else { changes += 1; return }
+        if own == nil { setShared(true) } else if ask(toShared: true) { move(toShared: true) }
+    }
+    // The Profile and NX 18 folder switch: off sends this game's saves back to its own folder (the move), or with none makes the NX 18 folder its own folder (nothing moves)
+    func toggleProfile() {
+        let p = NX18Profile.shared
+        guard p.enabled else { p.enabled = true; changes += 1; return }
+        if MacCloud.place().inNX18, CloudSavesSection.fixed == nil, busy == nil {
+            if own != nil { if ask(toShared: false) { move(toShared: false) } else { return } }
+            else if let nx = nx18 {
+                guard alert("Turn off the Profile and NX 18 folder for this game?", "This game's cloud saves stay in the NX 18 folder, now as its own folder. Nothing is deleted.",
+                            ["Turn Off", "Cancel"]) == 0 else { return }
+                defaults.set(nx, forKey: NX18CloudSaves.folderKey); setShared(false)
+            }
+        }
+        p.enabled = false; changes += 1
+    }
+
+    private func ask(toShared: Bool) -> Bool {
+        alert(toShared ? "Move this game's cloud saves to the NX 18 folder?" : "Move this game's cloud saves to its own folder?",
+              "The save is copied and checked before the folder changes. The old copy stays.", ["Move", toShared ? "Keep Them Where They Are" : "Cancel"]) == 0
+    }
+    private func alert(_ title: String, _ text: String, _ buttons: [String], returnPicks: Bool = true) -> Int {
+        let a = NSAlert(); a.messageText = title; a.informativeText = text
+        for b in buttons { a.addButton(withTitle: b) }
+        if !returnPicks { a.buttons[0].keyEquivalent = "" }   // Replace: never on Return
+        a.buttons.last?.keyEquivalent = "\u{1b}"
+        let r = a.runModal().rawValue - NSApplication.ModalResponse.alertFirstButtonReturn.rawValue
+        return r
+    }
+
+    func move(toShared: Bool, how: UInt32 = 0) {
+        guard let nx = nx18, let own, let save = getenv("DM_SAVE").map({ String(cString: $0) }), let title = info("DMTitleID") else { setShared(toShared); return }
+        let (from, to) = toShared ? (own, nx) : (nx, own)
+        // The move writes the folder it goes to at once: on a first sync of this game through that folder, iCloud has its save there first (or has none), as before Play
+        let first = how == 0 ? FirstSyncGate.prepare(folder: to) : nil
+        busy = first != nil ? FirstSyncGate.checking : "Moving your save…"; note = nil
+        Task.detached(priority: .userInitiated) {
+            if let first {
+                let o = first.run()
+                let go = await MainActor.run { () -> Bool in
+                    guard FirstSyncGate.finish(o, folder: to) else {
+                        self.busy = nil; self.note = "iCloud hasn't finished bringing this game's save from your other devices. Try again in a moment."; self.changes += 1
+                        return false
+                    }
+                    self.busy = "Moving your save…"; return true
+                }
+                if !go { return }
+            }
+            var out = [CChar](repeating: 0, count: 160)
+            let r = save_sync_move(save, from, to, title, how, 0, &out, out.count)
+            let line = String(decoding: out.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
+            await MainActor.run { self.afterMove(r, line: line, toShared: toShared) }
+        }
+    }
+    private func afterMove(_ r: Int32, line: String, toShared: Bool) {
+        busy = nil
+        switch r {
+        case 0, 1:   // SS_MOVE_DONE, SS_MOVE_SAME
+            FirstSyncGate.commit()   // the folder it checked is the one the saves now sync through
+            setShared(toShared); note = r == 0 ? "Moved and checked." : nil
+        case 2:      // SS_MOVE_ASK: the place it goes to holds another save of this game
+            var f: [String: Int64] = [:]
+            for p in line.split(separator: " ") { let kv = p.split(separator: "=", maxSplits: 1); if kv.count == 2 { f[String(kv[0])] = Int64(kv[1]) } }
+            let there = toShared ? "The NX 18 folder" : "This game's own folder"
+            switch alert("Replace the save there?", "\(there) already has another save of this game, from \(Self.day(f["to_saved"] ?? 0)). Replace it with this one, from \(Self.day(f["from_saved"] ?? 0))? The other is kept as a backup.",
+                         ["Replace", "Use the One There", "Cancel"], returnPicks: false) {
+            case 0: move(toShared: toShared, how: 1)   // SS_MOVE_REPLACE
+            case 1: move(toShared: toShared, how: 2)   // SS_MOVE_USE_THERE: the next start compares it with this Mac's
+            default: changes += 1
+            }
+        default:
+            note = "Could not move. Try again when online."; changes += 1
+        }
+    }
+    static func day(_ secs: Int64) -> String {
+        let f = DateFormatter(); f.dateStyle = .medium; f.timeStyle = .short
+        return f.string(from: Date(timeIntervalSince1970: TimeInterval(secs)))
     }
 }

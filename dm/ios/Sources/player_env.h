@@ -51,8 +51,9 @@
 // the residency set, =0 off; frame-rate.md), DM_NVN_PASS_REPEAT (=1, measurement only: the [pass repeat] line, the share of render passes recorded as one of the previous frame; frame-rate.md)
 // DM_NVN_LS_STATS (=1, measurement only: the [ls-stats] lines, attachment loads and stores by pass kind and the stores no later pass loads), DM_NVN_CLEARED_LOAD, DM_NVN_DS_DEAD_STORE,
 // DM_NVN_MSAA_RESOLVE_ONLY and DM_NVN_HOST_BARRIER (=0 each: that attachment-traffic or barrier reduction off, for the phone A/B; frame-rate.md), DM_NVN_ACQ_NEXT (=0: an acquired
-// image's sync is the commits at the acquire again, not the GPU end of the present after it, for a frame-rate A/B of upstream 1999cbd1f; frame-rate.md)
-static const char *const dm_player_kept_keys[]={"DM_NVN_WAITS","DM_SLOWFRAME","DM_REPLAY_RT","DM_REPLAY_SPARES","DM_FPS_HOLD_BACKOFF","DM_FPS_RESUME","DM_MOVIE_RESTART","DM_FIELD_LOG","DM_POWER_DETAIL","DM_YIELD_STORM","DM_YIELD_PARK","DM_NVN_GHOST",
+// image's sync is the commits at the acquire again, not the GPU end of the present after it, for a frame-rate A/B of upstream 1999cbd1f; frame-rate.md), DM_NVN_ACQ_DEFER (=0: the
+// window acquire takes its display wait itself again, for the frame-rate A/B of upstream c17a54984's deferred acquire; frame-rate.md)
+static const char *const dm_player_kept_keys[]={"DM_NVN_WAITS","DM_NVN_ACQ_DEFER","DM_SLOWFRAME","DM_REPLAY_RT","DM_REPLAY_SPARES","DM_FPS_HOLD_BACKOFF","DM_FPS_RESUME","DM_MOVIE_RESTART","DM_FIELD_LOG","DM_POWER_DETAIL","DM_YIELD_STORM","DM_YIELD_PARK","DM_NVN_GHOST",
     "DM_NVN_MDX_PRESCAN","DM_SW2_MODE","DM_NVN_BCRT_CACHE","DM_NVN_FAMILY_PFV","DM_NVN_FAMILY_NOCOMPRESS","DM_NVN_FB_SNAP_KEEP","DM_NVN_FB_SNAP_IDLE",
     "DM_NVN_FB_TILE_EARLY","DM_NVN_PASS_SPLIT","DM_NVN_PASS_SPLIT_MAX","DM_NVN_MFX_DIRECT","DM_NVN_SUB_MERGE","DM_NVN_SUB_IDLE_FB","DM_NVN_SUB_DRAIN","DM_NVN_CUT_HOLD","DM_NVN_CUT_EVENT","DM_NVN_PREDICT_NEXT","DM_NVN_DISPATCH_RANGE","DM_NVN_BG_PURGE","DM_NVN_CACHE_VOLATILE",
     "DM_NVN_RT_DEAD","DM_NVN_RT_DEAD_MS","DM_NVN_RT_DEAD_PRESSURE","DM_NVN_DEPTH_LAZY","DM_NVN_MIP_DROP","DM_NVN_MIP_DROP_MIN",

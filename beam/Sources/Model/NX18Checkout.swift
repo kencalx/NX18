@@ -45,6 +45,7 @@ struct BuildRequest: Sendable, Equatable {
     var manual: URL?             // --manual: the game's manual (PDF)
     var art: URL?, logo: URL?, icon: URL?   // --art, --logo, --icon: the player's picks
     var appName: String?         // --app-name: the player's name for the game (Rename)
+    var profileSeed: URL?        // --profile-seed: the player's Profile (ProfileSetup.seed) in the IPA for other tools (Route B); the Xcode route takes it at xcodebuild, a Mac app reads the Mac's own
     var xcode: XcodePrep?        // --prepare-xcode: an Xcode project to sign with the player's account (iPhone install, beam-design §3.4 Route A)
     struct XcodePrep: Sendable, Equatable { var bundleID: String; var teamID: String; var workspace: URL }
 
@@ -72,6 +73,7 @@ struct BuildRequest: Sendable, Equatable {
         if let icon { a += ["--icon", icon.path] }
         if let appName { a += ["--app-name", appName] }
         if let output { a += ["-o", output.path] }
+        if let profileSeed, target == .iPhone, xcode == nil { a += ["--profile-seed", profileSeed.path] }
         if let x = xcode {   // the workspace in the build folder, never NxNative.xcworkspace beside the player's game folder
             a += ["--prepare-xcode", "--keep-extracted", "--bundle-id", x.bundleID, "--team-id", x.teamID, "--xcode-workspace", x.workspace.path]
         }

@@ -15,54 +15,12 @@ import UIKit
 import WebKit
 
 enum LauncherGuidePage: String, Identifiable, CaseIterable, Sendable {
-    case guide, manual
+    case guide, manual, mine   // mine: the player's own documents (My files), as the in-game menu's Manual & documents lists them (GameDocumentsViewer.swift)
     var id: String { rawValue }
-    var title: String { self == .guide ? "Game guide" : "Manual" }
+    var title: String { self == .guide ? "Game guide" : self == .manual ? "Manual" : "My files" }
 }
 
-// The guide page shown: the footer buttons it assigned and whether there is a page to go back to, and what the header, the edge swipe and the controller do to it
-@MainActor final class LauncherGuidePageModel: ObservableObject {
-    @Published var footer: Set<String> = []   // the page's nx.footer buttons ("B", "L", "R", ...)
-    @Published var canGoBack = false           // the web view has a previous page
-    weak var web: WKWebView?
-    var close: () -> Void = {}
-
-    var hasBack: Bool { canGoBack || footer.contains("B") }
-    // A footer button on the page: the page's own when it assigned it; B left to the viewer goes to the previous page, else closes the viewer
-    func press(_ button: String) {
-        guard let web else { if button == "B" { close() }; return }
-        web.evaluateJavaScript(LauncherGuideFiles.footerScript(button)) { [weak self, weak web] r, _ in
-            MainActor.assumeIsolated {
-                guard let self, button == "B", (r as? String) ?? "back" == "back" else { return }
-                if let web, web.canGoBack { web.goBack() } else { self.close() }
-            }
-        }
-    }
-    func back() { press("B") }
-    // An arrow key (37 left, 38 up, 39 right, 40 down) and A, as the console's controller gives them to the page
-    func key(_ code: Int) { web?.evaluateJavaScript("window.__nx18 && __nx18.key && __nx18.key(\(code))", completionHandler: nil) }
-    func pressA() { web?.evaluateJavaScript("window.__nx18 && __nx18.a && __nx18.a()", completionHandler: nil) }
-
-    // A controller event while the guide's page is shown (Launcher.swift handle): every button goes to the page
-    func handle(_ e: LauncherPadEvent) -> Bool {
-        switch e {
-        case .left: key(37)
-        case .up: key(38)
-        case .right: key(39)
-        case .down: key(40)
-        case .a: pressA()
-        case .b: back()
-        case .l: press("L")
-        case .r: press("R")
-        case .x: press("X")
-        case .y: press("Y")
-        case .plus: press("Plus")
-        case .minus: press("Minus")
-        case .zl, .zr: return false
-        }
-        return true
-    }
-}
+// LauncherGuidePageModel (the guide page shown, its footer buttons and the controller on it) is in LauncherGuideFiles.swift: the in-game viewer on the Mac uses it too
 
 struct LauncherGuideSheet: View {
     let content: LauncherContent
@@ -70,20 +28,29 @@ struct LauncherGuideSheet: View {
     var closeGlyph: NXPadGlyph? = nil   // the controller's B (NXButtonGlyph.swift) while a controller is connected: beside Back while the guide has a page to go back to (B goes back there), else beside the close button
     var turnNames: (l: String, r: String)? = nil   // the connected pad's own names for its shoulders (LB / RB, L1 / R1: NXPadGlyphs.name), on the page-turn buttons; nil: L and R
     let close: () -> Void
+    var mine: [GameDocument] = []   // the player's own documents (Launcher.swift playerDocuments): a third chip, My files, a list whose pick opens in the in-game viewer's views
     @State private var page: LauncherGuidePage
     @StateObject private var model = LauncherGuidePageModel()
+    @StateObject private var docControl = GameDocumentControl()   // the picked document's controller moves, as in game
+    @State private var picked: GameDocumentOpen?
+    @State private var listFocus = 0
 
-    init(content: LauncherContent, scroller: LauncherScroller, closeGlyph: NXPadGlyph? = nil, turnNames: (l: String, r: String)? = nil, close: @escaping () -> Void) {
-        self.content = content; self.scroller = scroller; self.closeGlyph = closeGlyph; self.turnNames = turnNames; self.close = close
-        _page = State(initialValue: content.guide != nil ? .guide : .manual)
+    init(content: LauncherContent, scroller: LauncherScroller, mine: [GameDocument] = [], closeGlyph: NXPadGlyph? = nil, turnNames: (l: String, r: String)? = nil, close: @escaping () -> Void) {
+        self.content = content; self.scroller = scroller; self.mine = mine; self.closeGlyph = closeGlyph; self.turnNames = turnNames; self.close = close
+        _page = State(initialValue: content.guide != nil ? .guide : content.manual != nil ? .manual : .mine)
     }
-    private var pages: [LauncherGuidePage] { LauncherGuidePage.allCases.filter { $0 == .guide ? content.guide != nil : content.manual != nil } }
+    private var pages: [LauncherGuidePage] {
+        LauncherGuidePage.allCases.filter { switch $0 { case .guide: content.guide != nil; case .manual: content.manual != nil; case .mine: !mine.isEmpty } }
+    }
     private var onGuide: Bool { page == .guide && content.guide != nil }
+    private var inDocument: Bool { page == .mine && picked != nil }
 
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 12) {
-                if onGuide && model.hasBack {
+                if inDocument {
+                    circleButton("chevron.backward", label: "Back", glyph: closeGlyph) { unpick() }   // to My files' list
+                } else if onGuide && model.hasBack {
                     circleButton("chevron.backward", label: "Back", glyph: closeGlyph) { model.back() }
                 } else {
                     NX18Mark(height: 16).accessibilityHidden(true)
@@ -106,7 +73,7 @@ struct LauncherGuideSheet: View {
                         turnButton("R", icon: "chevron.right", label: "Next page", on: model.footer.contains("R"))
                     }
                 }
-                circleButton("xmark", label: "Close", glyph: (onGuide && model.hasBack) ? nil : closeGlyph, action: close)
+                circleButton("xmark", label: "Close", glyph: (onGuide && model.hasBack) || inDocument ? nil : closeGlyph, action: close)
                     .keyboardShortcut(.cancelAction)
             }
             .padding(.horizontal, 16).padding(.vertical, 10)
@@ -124,6 +91,8 @@ struct LauncherGuideSheet: View {
                     }
                 case .manual:
                     if let m = content.manual { LauncherManualView(url: m, scroller: scroller) }
+                case .mine:
+                    myFiles
                 }
             }
             .ignoresSafeArea(edges: .bottom)
@@ -138,13 +107,84 @@ struct LauncherGuideSheet: View {
                 guard p.count > 1, let i = p.firstIndex(of: page) else { return }
                 page = p[(i + step + p.count) % p.count]
             }
-            // The controller: ZL / ZR switch documents; on the guide every other button is the page's (the manual keeps Launcher.swift's: B closes, up / down scroll, L / R switch)
+            // The controller: ZL / ZR switch documents; on the guide every other button is the page's (the manual keeps Launcher.swift's: B closes, up / down scroll, L / R switch);
+            // on My files up / down and A pick from the list, and a document open takes the in-game viewer's moves (GameDocumentControl), B back to the list
             scroller.pad = { e in
                 if e == .zl || e == .zr { scroller.page?(e == .zr ? 1 : -1); return true }
+                if page == .mine { return myFilesPad(e) }
                 return onGuide ? model.handle(e) : false
             }
         }
         .onDisappear { scroller.page = nil; scroller.scroll = nil; scroller.pad = nil }
+    }
+
+    // My files: the player's documents, one row each (the name, what it is and where it is kept); a pick opens it here with the in-game viewer's views
+    @ViewBuilder private var myFiles: some View {
+        if let open = picked {
+            if open.failed {
+                Text("This document could not be opened. If it is in iCloud, check the connection and pick it again.")
+                    .nxFont(.body).foregroundStyle(.white.opacity(0.8)).multilineTextAlignment(.center).padding(32).frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if let url = open.url {
+                GameDocumentContent(doc: open.doc, url: url, control: docControl, close: { unpick() }).id(open.doc.id)
+            } else {
+                VStack(spacing: 10) {
+                    ProgressView().controlSize(.large).tint(NX18Palette.cyan)
+                    if open.doc.downloading { Text("Downloading from iCloud…").nxFont(.footnote).foregroundStyle(.white.opacity(0.7)) }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        } else {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(Array(mine.enumerated()), id: \.element.id) { i, d in
+                        Button { listFocus = i; pick(d) } label: {
+                            HStack(spacing: 12) {
+                                Image(systemName: GameDocuments.symbol(d)).font(.body.weight(.medium)).foregroundStyle(NX18Palette.cyan).frame(width: 28)   // system: symbol
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(d.title).nxFont(.body, weight: .semibold).foregroundStyle(.white).lineLimit(1)
+                                    Text(GameDocuments.note(d)).nxFont(.footnote).foregroundStyle(.white.opacity(0.65)).lineLimit(1)
+                                }
+                                Spacer(minLength: 0)
+                                Image(systemName: "chevron.right").font(.footnote.weight(.semibold)).foregroundStyle(.white.opacity(0.5))   // system: symbol
+                            }
+                            .padding(.horizontal, 14).frame(minHeight: 56)
+                            .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(NX18Palette.row))
+                            .overlay { if closeGlyph != nil && listFocus == i { RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(NX18Palette.cyan, lineWidth: 2) } }
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel(d.title).accessibilityHint(GameDocuments.note(d))
+                    }
+                }
+                .padding(20)
+                .frame(maxWidth: 760)
+                .frame(maxWidth: .infinity)
+            }
+        }
+    }
+    private func pick(_ d: GameDocument) {
+        docControl.take()
+        picked = GameDocumentOpen(doc: d)
+        Task { @MainActor in
+            let url = await GameDocuments.fetch(d)
+            guard picked?.doc.id == d.id else { return }
+            picked?.url = url; picked?.failed = url == nil
+        }
+    }
+    private func unpick() { docControl.take(); picked = nil }
+    private func myFilesPad(_ e: LauncherPadEvent) -> Bool {
+        if picked != nil {
+            if e == .b { unpick(); return true }
+            _ = docControl.handle(e)
+            return e != .plus
+        }
+        switch e {
+        case .up: listFocus = Swift.max(0, listFocus - 1)
+        case .down: listFocus = Swift.min(mine.count - 1, listFocus + 1)
+        case .a: if mine.indices.contains(listFocus) { pick(mine[listFocus]) }
+        default: return false   // B closes, L / R switch, as on the manual
+        }
+        return true
     }
 
     // glyph: the controller's button that does the same (B, on Back or the close button, while a controller is connected), beside it

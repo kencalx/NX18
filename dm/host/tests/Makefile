@@ -77,6 +77,7 @@ run: $(B)/t_net_eventfd $(B)/t_language $(B)/t_motion $(B)/t_heap_size $(B)/t_to
 	$(B)/t_account
 	$(B)/t_home_quit
 	$(B)/t_home_quit_mac
+	$(B)/t_game_menu_input
 	$(B)/t_ctrl_prompt
 	$(B)/t_motion_pro
 	$(B)/t_motion_pro_mac
@@ -362,6 +363,9 @@ $(B)/t_home_quit: t_home_quit.c ../home_quit.h | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -I.. -o $@ t_home_quit.c
 $(B)/t_home_quit_mac: t_home_quit_mac.m ../home_quit_mac.h ../ui_font.h | $(B)
 	$(CLANG) -O1 -g -fobjc-arc -Wall -Werror -Wno-unused-function -I.. -o $@ t_home_quit_mac.m -framework Cocoa -framework QuartzCore -framework CoreText
+run: $(B)/t_game_menu_input
+$(B)/t_game_menu_input: t_game_menu_input.c ../game_menu_input.h ../dm_input.h | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -I.. -o $@ t_game_menu_input.c
 run: $(B)/t_ctrl_prompt
 $(B)/t_ctrl_prompt: t_ctrl_prompt.c ../ctrl_prompt.h | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -fsanitize=address,undefined -I.. -o $@ t_ctrl_prompt.c

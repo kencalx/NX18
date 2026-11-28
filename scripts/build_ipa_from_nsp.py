@@ -2133,6 +2133,7 @@ def apple_silicon():   # hw.optional.arm64 is 1 on Apple silicon (for a Python u
 
 
 HOST_DIRS = ('dm/host', 'dm/gfx', 'dm/gfx/nvn', 'dm/gfx/nvn/include', 'dm/gfx/tex')   # the folders the host's compile lines take their sources and headers from (dm/host/Makefile SRC, GFX)
+HOST_SWIFT_DIRS = ('dm/mac', 'dm/ios/Sources')   # the in-game menu's Swift and its bridging headers, built into the host (dm/host/Makefile MENU_SWIFT); more than it takes, which costs a relink at most
 
 
 def decoder_host_key(host):
@@ -2156,10 +2157,11 @@ def build_mac_host(repo, out, env, logs, g):
     run(['make', '-s', f'GAME={g.id}', f'gen/{g.id}/game_profile.h', 'gen/vpx/libvpx.a', 'gen/dav1d/libdav1d.a', 'host_msl'], logs / 'mac_host_make.log', env=env, cwd=host)
     built = host / f'gen/{g.id}/dmhost'
     dry = subprocess.run(['make', '-n', '-B', f'GAME={g.id}', f'gen/{g.id}/dmhost'], env=env, cwd=host, capture_output=True, text=True)
-    cmd = [l for l in dry.stdout.splitlines() if l.startswith('clang') and f' -o gen/{g.id}/' in l]   # the host's compiles and its link, not the libraries'
+    cmd = [l for l in dry.stdout.splitlines() if (l.startswith('clang') and f' -o gen/{g.id}/' in l) or l.startswith('xcrun swiftc')]   # the host's compiles and its link, not the libraries'; the in-game menu's Swift
     if not any(f' -o gen/{g.id}/dmhost ' in l for l in cmd): raise BuildError(f'make -n gave no link line for the Mac host: {dry.stderr.strip()[-500:]}')
     kf, tp = out.with_name(out.name + '.key'), repo / 'dm/third_party'
     srcs = [p for d in HOST_DIRS for p in sorted((repo / d).iterdir()) if p.is_file() and p.suffix in ('.c', '.m', '.h', '.S', '.inc')]
+    srcs += [p for d in HOST_SWIFT_DIRS if (repo / d).is_dir() for p in sorted((repo / d).iterdir()) if p.is_file() and p.suffix in ('.swift', '.h')]
     common = fingerprint(cmd, ('files', [host / f'gen/{g.id}/game_profile.h', host / 'gen/msl-macosx/host_msl_gen.h', host / 'gen/vpx/libvpx.a', host / 'gen/dav1d/libdav1d.a', tp / 'stb_vorbis/stb_vorbis.c']),
                          ('tree', tp / 'libvpx/vpx'), ('tree', tp / 'dav1d/include'), ('cmd', ['clang', '--version']), ('cmd', ['xcrun', '--show-sdk-build-version']), env=env)
     key = fingerprint(common, ('files', srcs))
@@ -3402,6 +3404,8 @@ def parse_args(argv):
     ap.add_argument('--art-online', action=argparse.BooleanOptionalAction, help='find the launcher\'s art and "About this game" text online: titledb (the whole list, cached in ~/Library/Caches/nxnative/titledb), then SteamGridDB '
                     'when the STEAMGRIDDB_KEY setting or environment variable holds a key; --no-art-online keeps the build offline, art an earlier online build downloaded into the build folder\'s art/ is still used (default: the ART_ONLINE setting, on)')
     ap.add_argument('--manual', help='the game\'s manual, a PDF of your own, which the launcher opens (default: the MANUAL setting, else none)')
+    ap.add_argument('--profile-seed', help='the player\'s NX 18 Profile for the IPA: a folder holding profile.stamp (and name.txt, picture.jpg), packed as NX18ProfileSeed in the app, which takes it on its first start '
+                    'or when it is newer (NX 18 Beam passes it for its IPA for other install tools; build_ipa.sh DM_PROFILE_SEED). IPA only: the Xcode route gets it at xcodebuild (default: none)')
     ap.add_argument('--ui-font', help='one font for all of NX 18\'s own text in the app (launcher, prompts, progress screens, the Mac banner and Cheats window): a TTF, OTF or TTC of your own on this Mac, '
                     'bundled into the app built here only, never into the repository; a path inside the checkout must be one git ignores, such as local/fonts/ (default: the UI_FONT setting, else the system font)')
     ap.add_argument('--mac-sign', help='--platform mac-app: the codesign identity for the app, e.g. "Developer ID Application: <name> (<team>)" (default: the MAC_SIGN setting, else ad-hoc)')
@@ -3744,6 +3748,9 @@ def main(args=None):
     if user_logo and not user_logo.is_file(): raise BuildError(f'no such logo file (--logo / LOGO): {user_logo}')
     manual = Path(os.path.expanduser(args.manual or MANUAL)).resolve() if args.manual or MANUAL else None
     if manual and not manual.is_file(): raise BuildError(f'no such manual file (--manual / MANUAL): {manual}')
+    profile_seed = Path(os.path.expanduser(args.profile_seed)).resolve() if getattr(args, 'profile_seed', None) else None
+    if profile_seed and (mac or prepare_xcode): raise BuildError('--profile-seed goes into the IPA: it cannot be combined with ' + (f'--platform {platform}' if mac else '--prepare-xcode, whose xcodebuild takes DM_PROFILE_SEED'))
+    if profile_seed and not (profile_seed / 'profile.stamp').is_file(): raise BuildError('--profile-seed is not an NX 18 Profile (no profile.stamp in the folder)')   # never its path: a temporary folder of the player's
     if manual:
         with open(manual, 'rb') as f:
             if f.read(4) != b'%PDF': raise BuildError(f'the manual (--manual / MANUAL) is not a PDF: {manual}')
@@ -4059,6 +4066,7 @@ def main(args=None):
     if built_by: ipa_env['DM_BUILT_BY'] = built_by
     if ui_font: ipa_env['DM_UI_FONT'], ipa_env['DM_UI_FONT_NAME'] = str(ui_font[0]), ui_font[1]   # the UI font: dm/uifont/ in the app, its name in Info.plist (build_ipa.sh)
     if env_file: ipa_env['DM_ENV_FILE'] = str(Path(os.path.expanduser(env_file)).resolve())
+    if profile_seed: ipa_env['DM_PROFILE_SEED'] = str(profile_seed); say('NX 18 Profile: in the app')   # never the name
     if packed_cheats: ipa_env['DM_PACKED_CHEATS'] = str(packed_cheats); say(f'cheats packed into the app from the mods folder: {", ".join(p.name for p in sorted(packed_cheats.iterdir()))} (the app copies them into its cheats folder; the in-game menu turns them on)')
     show_fps = SHOW_FPS if args.show_fps is None else args.show_fps
     ipa_env['DM_SHOW_FPS'] = '1' if show_fps else '0'

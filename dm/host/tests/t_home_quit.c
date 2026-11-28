@@ -1,5 +1,6 @@
 // The Home button's hold and quit prompt (home_quit.h): the hold time, letting go early, A and B in the prompt, a button already held when it opens, Home closing it,
-// the settle phase that keeps the closing B from the game, losing the focus, the hold indicator, the switch, a front end's texts and the setting's log word
+// the settle phase that keeps the closing B from the game, losing the focus, the hold indicator, the switch, a front end's texts and the setting's log word; a short press is a tap
+// (the in-game menu), with the hold off every press is
 #include "../home_quit.h"
 #include <stdio.h>
 
@@ -80,6 +81,29 @@ int main(void) {
 
     CHECK(!strcmp(hq_in_app_name(0), "system") && !strcmp(hq_in_app_name(1), "app") && !strcmp(hq_in_app_name(-1), "unavailable"), "the setting's words");
     CHECK(!strcmp(hq_in_app_name(0x7fffffffffffffffL), "off"), "disabled is off");
+
+    // A tap: let go before the indicator shows opens the in-game menu (hq_take_tap), once; a longer press that ends before the prompt does nothing
+    q = (home_quit){0};
+    hq_step(&q, 0, 1, 0, 0);
+    CHECK(!hq_take_tap(&q), "no tap while Home is down");
+    hq_step(&q, HQ_RING_S / 2, 0, 0, 0);
+    CHECK(hq_take_tap(&q), "let go before the indicator: a tap");
+    CHECK(!hq_take_tap(&q), "a tap is taken once");
+    hq_step(&q, 1.0, 1, 0, 0);
+    hq_step(&q, 1.0 + HQ_RING_S + 0.1, 0, 0, 0);
+    CHECK(q.phase == HQ_IDLE && !hq_take_tap(&q), "let go after the indicator showed: no tap, no prompt");
+    hq_step(&q, 2.0, 1, 0, 0); hq_step(&q, 4.0, 1, 0, 0);
+    CHECK(q.phase == HQ_PROMPT && !hq_take_tap(&q), "the hold still opens the quit prompt, with no tap");
+    q = (home_quit){0};
+    hq_step(&q, 0, 1, 0, 0); hq_cancel(&q);
+    CHECK(!hq_take_tap(&q), "a focus loss is no tap");
+    // The hold off (DM_HOME_QUIT=0): no indicator, no prompt, and any press is a tap
+    q = (home_quit){.no_quit = 1};
+    hq_step(&q, 0, 1, 0, 0);
+    CHECK(hq_ring(&q, 1.0) == -1, "no indicator with the hold off");
+    CHECK(hq_step(&q, 5.0, 1, 0, 0) == HQ_HOLDING, "no prompt with the hold off");
+    hq_step(&q, 6.0, 0, 0, 0);
+    CHECK(hq_take_tap(&q), "with the hold off a long press is a tap too");
 
     printf("t_home_quit: %d checks, %d failed\n", checks, fails);
     return fails != 0;

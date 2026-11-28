@@ -11,6 +11,7 @@
 #include <errno.h>
 #include <stdatomic.h>
 #include "front.h"
+#include "front_setting.h"   // the present's notes for the in-game menu's rows, shared with the Mac (dm_setting_why)
 #include "hle.h"
 #include "dm.h"
 #include "front_drawable.h"   // DM_DRAWABLE_COUNT
@@ -527,25 +528,7 @@ const char *dm_setting_why(const char *env) {
         if (!dm_gamepad_touch_hidden()) return NULL;
         return !strcmp(env, "DM_TOUCH_SIZE") ? "Only sizes the menu button now" : "Touch controls are hidden";   // the menu button and the counter still follow the size
     }
-    if (!strcmp(env, "DM_PRESENT_UPSCALE")) switch (mtl_present_fx_why()) {
-        case DM_FX_STRETCHED: return "Not upscaling: picture is stretched";
-        case DM_FX_NOT_LARGER: return "Not upscaling: picture isn't shown larger";
-        case DM_FX_REFUSED: return "Not upscaling: MetalFX can't take this size";
-        default: return NULL;   // upscaling, or Standard
-    }
-    if (!strcmp(env, "DM_PRESENT_SHARPEN")) switch (mtl_present_sharp_why()) {
-        case DM_SHARP_METALFX: return "Off while MetalFX upscales";
-        case DM_SHARP_GAME_UPSCALER: return "Off while MetalFX runs the game's upscaler";
-        case DM_SHARP_FORMAT: return "Not supported for this game's picture";
-        case DM_SHARP_PIPELINE: return "Couldn't start: see Share log";   // its pipeline failed to build (a [RED] line in the log), as edge smoothing's below
-        default: return NULL;
-    }
-    if (!strcmp(env, "DM_POST_AA")) switch (mtl_present_aa_why()) {
-        case DM_AA_FORMAT: return "Not supported for this game's picture";
-        case DM_AA_FAILED: return "Couldn't start: see Share log";
-        default: return NULL;
-    }
-    return NULL;
+    return front_setting_present_why(env, mtl_present_fx_why(), mtl_present_sharp_why(), mtl_present_aa_why(), 1);   // Upscaling, Sharpening, Anti-aliasing (front_setting.h, shared with the Mac)
 }
 // Whether the running game says a live setting's choice took effect at the last present, which dm_setting_why's NULL does not tell apart from "nothing known yet" (0 before the
 // first present): MetalFX upscaled. GameMenu.swift then leaves out the launcher's hint for the row, which can only say MetalFX may not run under Ultrawide. Main thread
@@ -784,7 +767,12 @@ static int multi_program(void) { const char *e = getenv("DM_EXEC_OUT"); return e
 }
 @end
 static DmNotifyDelegate *g_notify_delegate;
+static NSString *const kGateNext = @"launcher.gateNext", *const kGateNote = @"dm.gate";   // LauncherModel.gateNextKey; Exit and return to Gate's notification (dm_exit_to_gate)
 static void front_ios_notify_setup(void) {   // at each start: the delegate, and no notification left from an earlier hand-off (the app is open now)
+    if ([NSUserDefaults.standardUserDefaults boolForKey:kGateNext]) {   // a start after Exit and return to Gate: its "Tap to return to the Gate" has done its work
+        UNUserNotificationCenter *c = UNUserNotificationCenter.currentNotificationCenter;
+        [c removePendingNotificationRequestsWithIdentifiers:@[kGateNote]]; [c removeDeliveredNotificationsWithIdentifiers:@[kGateNote]];
+    }
     if (!multi_program()) return;
     UNUserNotificationCenter *c = UNUserNotificationCenter.currentNotificationCenter;
     g_notify_delegate = [DmNotifyDelegate new]; c.delegate = g_notify_delegate;
@@ -863,6 +851,35 @@ void front_program_handoff(int index, const char *name) {   // front.h; on the g
     if (dispatch_semaphore_wait(added, dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC))) LOG("[RED] front end: the notification for program %d was not scheduled within 2 s", index);
     else if (err) LOG("[RED] front end: the notification for program %d could not be scheduled: %s", index, err.localizedDescription.UTF8String);
     else LOG("front end: \"Starting %s\" shown, notification for program %d scheduled", nm.UTF8String, index);
+}
+// The in-game menu's Exit and return to Gate (GameMenu.swift GameMenuExit, after its confirmation; main thread, the panel closing). The game cannot be unloaded inside the process
+// (the guest runs on main.m's thread until the process ends) and iOS cannot start the process again, so the app ends the way oe::ExecuteProgram's hand-over ends it (hle_oe.c
+// oe_start, front_program_handoff): the pipeline archive starts writing, a line on a dark screen in the game's place, then the graceful exit (dm_host_shutdown: the cloud save's
+// send, the archive's write, _exit). The Gate shows at the next start, once, whatever would skip it (launcher.gateNext, written through before the exit; LauncherShortcuts.start,
+// taken away as the Gate shows). The line shows for 1.5 s, as the hand-over's; then, with notifications already allowed (asked only by an app of several programs, at its first
+// start: never asked here), a notification 1 s ahead opens the app again ("Tap to return to the Gate"); without, the line asks the player to open the app again
+void dm_exit_to_gate(void) {
+    static _Atomic int once; if (atomic_exchange(&once, 1)) return;   // the menu can open again over the notice (the Home button): one exit, one notice, one notification
+    [NSUserDefaults.standardUserDefaults setBool:YES forKey:kGateNext]; [NSUserDefaults.standardUserDefaults synchronize];   // before the exit, which runs no handler that would write it
+    LOG("front end: Exit and return to Gate chosen in the in-game menu; the game ends, the Gate shows at the next start");
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{   // off the main thread: the notice is drawn there while this waits, and the exit waits
+        dm_gfx_quit_begin();   // as the hand-over: the pipeline archive starts writing now, beside the notice
+        int notify = notify_allowed();
+        handoff_notice(notify ? @"Returning to the Gate\u2026" : @"Open the app again to return to the Gate.");
+        usleep(1500 * 1000);   // the line stays as long as the hand-over's does
+        if (notify) {
+            UNUserNotificationCenter *c = UNUserNotificationCenter.currentNotificationCenter;
+            dispatch_sync(dispatch_get_main_queue(), ^{ if (!g_notify_delegate) { g_notify_delegate = [DmNotifyDelegate new]; c.delegate = g_notify_delegate; } });   // shown even while the exit still runs
+            UNMutableNotificationContent *t = [UNMutableNotificationContent new]; t.body = @"Tap to return to the Gate";
+            UNNotificationRequest *r = [UNNotificationRequest requestWithIdentifier:kGateNote content:t trigger:[UNTimeIntervalNotificationTrigger triggerWithTimeInterval:1.0 repeats:NO]];
+            __block NSError *err = nil; dispatch_semaphore_t added = dispatch_semaphore_create(0);
+            [c addNotificationRequest:r withCompletionHandler:^(NSError *e) { err = e; dispatch_semaphore_signal(added); }];
+            if (dispatch_semaphore_wait(added, dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC))) LOG("[RED] front end: the notification back to the Gate was not scheduled within 2 s");
+            else if (err) LOG("[RED] front end: the notification back to the Gate could not be scheduled: %s", err.localizedDescription.UTF8String);
+            else LOG("front end: notification back to the Gate scheduled");
+        }
+        dm_host_shutdown("Exit and return to Gate");
+    });
 }
 void front_run(void (*guest)(void)) { guest(); }   // Already on main.m's big-stack thread
 

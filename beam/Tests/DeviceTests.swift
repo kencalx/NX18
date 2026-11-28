@@ -68,6 +68,18 @@ import Testing
                                                  profileSeed: URL(fileURLWithPath: "/t/s/NX18ProfileSeed"))
         #expect(seeded.contains("DM_PROFILE_SEED=/t/s/NX18ProfileSeed") && seeded.last == "build", "the Profile seed, a build setting the resource phase reads (stage_resources.sh)")
     }
+    @Test func ipaRequestCarriesTheSeed() {   // Route B: the IPA for other install tools carries the Profile too (build_ipa.sh DM_PROFILE_SEED through --profile-seed)
+        let seed = URL(fileURLWithPath: "/t/beam-seed-1/NX18ProfileSeed")
+        var r = BuildRequest(source: URL(fileURLWithPath: "/g/Z/z.nup"), target: .iPhone, keys: nil, package: nil, titleId: nil, workDir: URL(fileURLWithPath: "/space/X"))
+        #expect(!r.arguments(script: URL(fileURLWithPath: "/nx18/s.py")).contains("--profile-seed"), "no Profile: no seed")
+        r.profileSeed = seed
+        let a = r.arguments(script: URL(fileURLWithPath: "/nx18/s.py"))
+        #expect(a.firstIndex(of: "--profile-seed").map { a[$0 + 1] } == seed.path)
+        var x = r; x.xcode = .init(bundleID: "org.nxnative.t1.x", teamID: "ABCDE12345", workspace: URL(fileURLWithPath: "/space/X/Beam.xcworkspace"))
+        #expect(!x.arguments(script: URL(fileURLWithPath: "/nx18/s.py")).contains("--profile-seed"), "the Xcode route takes it at xcodebuild (DM_PROFILE_SEED)")
+        var m = r; m.target = .mac
+        #expect(!m.arguments(script: URL(fileURLWithPath: "/nx18/s.py")).contains("--profile-seed"), "a Mac app reads the Mac's Profile itself")
+    }
 }
 
 @Suite struct SlotTests {

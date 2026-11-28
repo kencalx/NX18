@@ -23,11 +23,19 @@ struct LibraryView: View {
                             ForEach(library.games) { g in GameRow(game: g).tag(g.id).contextMenu { GameContextMenu(gameID: g.id) } }
                         }
                     }
+                    .safeAreaInset(edge: .bottom) { RebuildBar() }   // NX 18 moved on: the games it changed, rebuilt three at a time
                     .navigationSplitViewColumnWidth(min: 220, ideal: 260)
                     .overlay { if library.games.isEmpty { Text("No games yet").foregroundStyle(.secondary) } }
                     .toolbar {
                         ToolbarItem { Button("Add a Game", systemImage: "plus") { picking = true } }
                         ToolbarItem { Button("Beam Home", systemImage: "gamecontroller") { library.showingHome = true }.help("Beam Home: your games full screen, for a controller (⌃⌘H)") }
+                        if library.renewDue() {   // an install on an iPhone or iPad runs out within 2 days, or has
+                            ToolbarItem {
+                                Button(library.renewingAll ? "Renewing…" : "Renew All", systemImage: "arrow.clockwise") { library.renewAll() }
+                                    .disabled(library.renewingAll)
+                                    .help("Renew every game that expires within 2 days on a connected iPhone or iPad")
+                            }
+                        }
                     }
                 } detail: {
                     if let id = selection, library.games.contains(where: { $0.id == id }) {
@@ -59,6 +67,10 @@ struct LibraryView: View {
             guard settings.welcomed else { return }
             if settings.whatsNewSeen != BeamUpdate.currentVersion { whatsNew = true; settings.whatsNewSeen = BeamUpdate.currentVersion }
             await library.checkForUpdateIfDue()
+            await library.checkRebuilds()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in   // the NX 18 checkout may have moved while Beam was away
+            if settings.welcomed { Task { await library.checkRebuilds() } }
         }
         .sheet(isPresented: $whatsNew) { WhatsNewSheet() }
         .alert("Rename \(library.games.first { $0.id == library.renameRequest }?.title ?? "the game")",
@@ -79,13 +91,32 @@ struct LibraryView: View {
             if let r = library.updateAvailable, let u = URL(string: r.htmlUrl) {
                 HStack {
                     Image(systemName: "arrow.down.circle").foregroundStyle(NX18Palette.coral)
-                    Text("\(r.name ?? r.tagName) is available.")
-                    Link("See the release", destination: u)
+                    switch library.updateStep {
+                    case .working(let what)?:
+                        Text("\(r.name ?? r.tagName): \(what)"); ProgressView().controlSize(.small)
+                    case .failed(let why)?:
+                        Text(why)
+                        Link("See the release", destination: u)
+                    case nil:
+                        Text("\(r.name ?? r.tagName) is available.")
+                        Link("See the release", destination: u)
+                    }
                     Spacer()
-                    Button("Later") { library.updateAvailable = nil }
+                    if library.updateStep?.isWorking != true {
+                        Button("Later") { library.updateAvailable = nil; library.updateStep = nil }
+                    }
+                    if library.canInstallUpdate, library.updateStep == nil {   // the preferred action last, at the trailing edge (macOS 27)
+                        Button("Install and Relaunch") { library.installUpdate() }
+                            .buttonStyle(.glassProminent)
+                            .disabled(library.busyForUpdate)
+                            .help(library.busyForUpdate ? "Beam installs its update once the builds and installs finish." : "")
+                    }
                 }
-                .padding(.horizontal, 16).padding(.vertical, 8)
-                .background(NX18Palette.charcoal)
+                .padding(.horizontal, 16).padding(.vertical, 10)
+                .glassEffect(.regular, in: .rect(cornerRadius: 16))   // the system's glass, as the toolbar's: it frosts itself under Reduce Transparency and Increase Contrast
+                .padding(.horizontal, 12).padding(.top, 6)
+                .accessibilityElement(children: .contain)
+                .accessibilityLabel("Beam update")
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .beamImportNXPlay)) { _ in importLib = NXPlayLibrary.find() }
@@ -103,6 +134,9 @@ struct LibraryView: View {
         } message: {
             Text("A first build takes 30 to 60 minutes and uses a lot of power. Build now, or when this Mac is plugged in?")
         }
+        .alert("Renew All", isPresented: Binding(get: { library.renewNote != nil && !library.showingHome }, set: { if !$0 { library.renewNote = nil } })) {   // Home says it in its own top bar
+            Button("OK") { library.renewNote = nil }
+        } message: { Text(library.renewNote ?? "") }
         .alert("Beam", isPresented: Binding(get: { library.lastError != nil }, set: { if !$0 { library.lastError = nil } })) {
             Button("OK") { library.lastError = nil }
         } message: { Text(library.lastError ?? "") }
@@ -122,6 +156,8 @@ private struct GameRow: View {
                     if library.identifying.contains(game.id) { Text("Reading…") }
                     else if library.playing == game.id { Text("Playing") }
                     else if let job = library.jobs[game.id], job.isActive { Text(job.state == .waitingForPower ? "Build when charging" : "Building · \(job.stageName)") }
+                    else if let e = library.expiryBadge(game.id) { Label(e.text, systemImage: e.expired ? "exclamationmark.circle.fill" : "clock").foregroundStyle(NX18Palette.coral) }
+                    else if library.rebuilds[game.id] != nil { Label("Update available: rebuild", systemImage: "arrow.triangle.2.circlepath").labelStyle(.titleAndIcon) }
                     else if let i = game.identity { Text(i.isSwitch2 ? "Switch 2" : "Switch") }
                     else { Text("Not read yet") }
                 }
@@ -129,6 +165,36 @@ private struct GameRow: View {
             }
         }
         .padding(.vertical, 2)
+    }
+}
+
+/// Below the games, only while NX 18 changed some built ones: rebuild them (three at a time), or how far a rebuild is, or tonight's
+private struct RebuildBar: View {
+    @Environment(Library.self) private var library
+    var body: some View {
+        let n = library.rebuildCandidates.count
+        if let p = library.rebuildProgress {
+            HStack {
+                Text("Rebuilding updated games: \(min(p.done + 1, p.total)) to \(min(p.done + 3, p.total)) of \(p.total)").font(.callout).foregroundStyle(.secondary)
+                Spacer()
+                Button("Stop") { library.stopRebuilding() }.controlSize(.small)
+            }
+            .padding(.horizontal, 14).padding(.vertical, 10)
+        } else if let t = library.tonight {
+            HStack {
+                Text("Rebuilding updated games at \(t.formatted(date: .omitted, time: .shortened))").font(.callout).foregroundStyle(.secondary)
+                Spacer()
+                Button("Cancel") { library.cancelTonight() }.controlSize(.small)
+            }
+            .padding(.horizontal, 14).padding(.vertical, 10)
+        } else if n > 0 {
+            Button { library.rebuildUpdated() } label: {
+                Label(n == 1 ? "Rebuild 1 Updated Game" : "Rebuild \(n) Updated Games", systemImage: "arrow.triangle.2.circlepath").frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.glass)
+            .help("NX 18 changed since these games were built. Beam rebuilds them three at a time and keeps this Mac awake until they are done.")
+            .padding(.horizontal, 12).padding(.vertical, 10)
+        }
     }
 }
 

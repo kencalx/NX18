@@ -35,8 +35,11 @@ enum GamePlayer {
         let p = Process()
         p.executableURL = exe
         var env = ProcessInfo.processInfo.environment
-        env["DM_LAUNCHER"] = "0"   // no settings window: Beam's Play starts the game at once
         for (k, v) in extraEnvironment { env[k] = v }
+        env["DM_LAUNCHER"] = "0"   // no settings window (the Gate), whatever else is set: Beam's Play starts the game at once. Set here, in the launch environment, it wins over
+                                   // the game's env.txt files and its "Show this window at launch" (dm/mac/launcher.c: env files never replace a set variable; the window is decided before saved choices)
+        env["DM_STARTED_BY"] = "beam"   // the game's in-game menu reads it: Exit and return to Beam quits the game and brings Beam (Home) to the front, not the game's own window
+                                        // (dm/ios/Sources/GameMenu.swift MacExitTarget)
         p.environment = env
         p.standardInput = FileHandle.nullDevice
         return try await withCheckedThrowingContinuation { c in

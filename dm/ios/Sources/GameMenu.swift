@@ -5,8 +5,16 @@
 // the settings screen, which the menu's title points to. A row that does nothing at the moment says why under its name (gameMenuRow): greyed when nothing the player picks there
 // can take effect, still selectable when only the current choice does nothing. The menu is built here once as GameMenuItem rows (gameMenuSections), each time it opens, and drawn
 // two ways: by default as NX 18's own panel (GameMenuPanel.swift: NX 18's colours and UI font, touch, controller and VoiceOver), and with DM_GAME_MENU=system as the UIMenu it
-// always was (gameMenuItems, uiMenuElement; DmGamepad.m picks), so both show the same rows, notes and actions
+// always was (gameMenuItems, uiMenuElement; DmGamepad.m picks), so both show the same rows, notes and actions.
+// The Mac's game app builds the same rows in its host (dm/host/Makefile links this file, GameMenuPanel.swift and the launcher's model into dmhost; front_mac.m dm_setting_live):
+// no controller layout, touch controls or recording there, Show log in place of Share log, Gate at start is the Mac window's own choice (window.show), and a Quit row
+#if os(iOS)
 import UIKit
+typealias GameMenuAnchor = UIView   // what a pick is anchored to: the menu button (an iPad's popover points at it)
+#else
+import AppKit
+typealias GameMenuAnchor = NSView   // the game window's content view (front_mac.m)
+#endif
 
 @MainActor var gameMenuModel: LauncherModel?   // main-actor state: written by dm_show_launcher, read by the menu, both on the main thread; the settings screen's model (Launcher.swift); nil in an app without one: the menu has the layout only
 
@@ -26,10 +34,10 @@ struct GameMenuItem: Identifiable {
     var closesMenu = false                // the panel closes first (Share log: the share sheet or the alert is the system's, over the game)
     var summary = false                   // a submenu whose subtitle sums up its page's values (Touch controls): the panel draws it under the name, VoiceOver reads it as the value
     var kind: Kind
-    var perform: (@MainActor (UIView?) -> Void)?   // the pick; its argument is the menu button (an iPad's popover points at it)
+    var perform: (@MainActor (GameMenuAnchor?) -> Void)?   // the pick; its argument is the menu button (an iPad's popover points at it), the game's view on the Mac
 
     init(id: String, title: String, subtitle: String? = nil, symbol: String? = nil, disabled: Bool = false, closesMenu: Bool = false, summary: Bool = false, kind: Kind = .action,
-         perform: (@MainActor (UIView?) -> Void)? = nil) {
+         perform: (@MainActor (GameMenuAnchor?) -> Void)? = nil) {
         self.id = id; self.title = title; self.subtitle = subtitle; self.symbol = symbol; self.disabled = disabled; self.closesMenu = closesMenu; self.summary = summary; self.kind = kind
         self.perform = perform
     }
@@ -49,6 +57,7 @@ struct GameMenuSection: Identifiable {
     var label: String? { title.isEmpty ? heading : title }
 }
 
+#if os(iOS)
 @_cdecl("dm_game_menu")
 public func dmGameMenu() -> UnsafeMutableRawPointer {
     let menu = MainActor.assumeIsolated {   // DmGamepad.m asks for the menu on the main thread (UIKit); a call from any other thread stops here instead of racing gameMenuModel
@@ -57,7 +66,6 @@ public func dmGameMenu() -> UnsafeMutableRawPointer {
     return Unmanaged.passRetained(menu).toOpaque()
 }
 
-@MainActor func gameMenuTitle() -> String { gameMenuModel != nil ? "More on the settings screen" : "" }
 
 // The menu as UIMenu elements (DM_GAME_MENU=system). Its text size is fixed there: front_ios.m startGame
 @MainActor func gameMenuItems() -> [UIMenuElement] { uiMenuElements(gameMenuSections()) }   // not private: the Duo harness's menu test reads the rows (dm/ios/tests/duo)
@@ -83,20 +91,31 @@ public func dmGameMenu() -> UnsafeMutableRawPointer {
         return a
     }
 }
+#endif
+
+#if os(iOS)
+@MainActor func gameMenuTitle() -> String { gameMenuModel != nil ? "More on the settings screen" : "" }
+#else
+@MainActor func gameMenuTitle() -> String { gameMenuModel != nil ? "More in the settings window" : "" }
+#endif
 
 // The rows, built each time the menu opens (and after each pick in the panel), so they show the current choices
 @MainActor func gameMenuSections() -> [GameMenuSection] {
     gameMenuModel?.refreshFacts()   // the rules' device terms as they are now: the app's window (an iPad's, resized while the game runs; MetalFX's Stretch rules), a TV
+    #if os(iOS)
     let names = ["2D", "3D", "Tap"]
     let layouts = (0..<3).filter { dm_pad_layout_offered(Int32($0)) }.map { l in
         GameMenuItem(id: "layout=\(l)", title: names[l], kind: .toggle(dm_pad_layout() == l)) { _ in dm_pad_layout_set(Int32(l)) }
     }
-    let layout = GameMenuItem(id: "layout", title: "Controller layout", kind: .choice(layouts))
+    let layout: GameMenuItem? = GameMenuItem(id: "layout", title: "Controller layout", kind: .choice(layouts))
+    #else
+    let layout: GameMenuItem? = nil   // the touch controls' layout: the Mac has none
+    #endif
     var sections: [GameMenuSection] = []
-    var placed = false
+    var placed = layout == nil
     if let m = gameMenuModel {
         for section in m.sections {
-            var rows: [GameMenuItem] = section == "Controls" ? [layout] : []
+            var rows: [GameMenuItem] = section == "Controls" ? (layout.map { [$0] } ?? []) : []
             if section == "Controls" { placed = true }
             var touch: [(setting: Setting, item: GameMenuItem)] = [], touchAt = 0   // the touch controls' rows shown, and where the first was
             for s in m.rows(in: section) where (s.kind == "choice" || s.kind == "toggle") && dm_setting_live(s.env, nil) {
@@ -106,8 +125,10 @@ public func dmGameMenu() -> UnsafeMutableRawPointer {
             if !rows.isEmpty { sections.append(GameMenuSection(id: "section:\(section)", heading: section, items: rows)) }
         }
     }
-    if !placed { sections.insert(GameMenuSection(id: "section:Controls", heading: "Controls", items: [layout]), at: 0) }
+    if !placed, let layout { sections.insert(GameMenuSection(id: "section:Controls", heading: "Controls", items: [layout]), at: 0) }
     if let cheats = cheatsMenu() { sections.append(GameMenuSection(id: "section:cheats", heading: "More", items: [cheats])) }
+    if let docs = gameDocumentsRow() { sections.append(GameMenuSection(id: "section:docs", heading: "More", items: [docs])) }   // Manual & documents (GameDocumentsViewer.swift)
+    #if os(iOS)
     let shot = GameMenuItem(id: "screenshot", title: "Take Screenshot", subtitle: "Saved in the game's Captures folder", symbol: "camera", closesMenu: true) { anchor in dm_capture_screenshot(anchor) }   // DmCapture.m: the next frame, once the panel is gone
     let rec = dm_capture_recording()
     let record = GameMenuItem(id: "record", title: rec ? "Stop Recording" : "Start Recording", subtitle: rec ? { let t = dm_capture_recording_seconds(); return "Recording for \(t / 60):\(String(format: "%02d", t % 60))" }() : "The game and its sound, until you stop it", symbol: rec ? "stop.circle" : "record.circle", closesMenu: true) { anchor in dm_capture_record_toggle(anchor) }   // DmCapture.m: ScreenCaptureKit
@@ -115,18 +136,26 @@ public func dmGameMenu() -> UnsafeMutableRawPointer {
     var last: [GameMenuItem] = []
     if let m = gameMenuModel { last.append(settingsAtStartRow(m)) }
     sections.append(GameMenuSection(id: "section:app", heading: "More", items: [shot, record] + last + [share]))
+    #else
+    sections.append(GameMenuSection(id: "section:app", heading: "More", items: macMoreRows()))
+    #endif
     return sections
 }
 
 // The panel's first page in the Gate's language (gate-ui §19.2, presets-first §8): the preset chooser (the panel draws it from the launcher's model), the live quick tiles,
 // 3 per row (Picture, Console mode, Vitals, Game rumble, Touch controls, Controller layout: each only where the game takes it live and the list shows it), and the doors:
-// Customize (the live rows a preset sets, then the other live rows, then Back to the base while Custom), Cheats (only with a cheats folder) and More (Take Screenshot, Gate at start, Share log).
+// Customize (the live rows a preset sets, then the other live rows, then Back to the base while Custom), Cheats (only with a cheats folder), Manual & documents (only when there is
+// one: GameDocumentsViewer.swift) and More (Take Screenshot, Gate at start, Share log). Four doors stand two by two (GameMenuLayout.doorLines).
 // The same items as gameMenuSections (its rows, ids and actions), so a pick does what it does in the UIMenu; DM_GAME_MENU=system keeps that flat list
 struct GameMenuHome {
     var tiles: [GameMenuItem] = []
     var doors: [GameMenuItem] = []
 }
+#if os(iOS)
 let gameMenuTileOrder = ["DM_PICTURE_FIT", "DM_OPMODE", "DM_SHOW_FPS", "DM_RUMBLE", "touch", "layout"]
+#else
+let gameMenuTileOrder = ["DM_OPMODE", "DM_FULLSCREEN", "DM_RUMBLE"]   // the Mac's Gate swaps Display mode in for Picture (LauncherPanel.swift gateQuickFirst); no touch controls
+#endif
 
 @MainActor func gameMenuHome() -> GameMenuHome {
     let flat = gameMenuSections().flatMap(\.items)
@@ -161,10 +190,20 @@ let gameMenuTileOrder = ["DM_PICTURE_FIT", "DM_OPMODE", "DM_SHOW_FPS", "DM_RUMBL
         home.doors.append(GameMenuItem(id: "door.customize", title: "Customize", subtitle: n == 1 ? "1 setting" : "\(n) settings", symbol: "slider.horizontal.3", kind: .submenu(groups)))
     }
     if let cheats = flat.first(where: { $0.id == "cheats" }) { home.doors.append(cheats) }
-    let more = flat.filter { $0.id == "screenshot" || $0.id == "record" || $0.id == "atstart" || $0.id == "share" }
-    home.doors.append(GameMenuItem(id: "door.more", title: "More", subtitle: "Screenshot, Recording, Gate at start, Share log", symbol: "ellipsis.circle", kind: .submenu([GameMenuSection(id: "more.all", inline: false, items: more)])))
+    if let docs = flat.first(where: { $0.id == "docs" }) { home.doors.append(docs) }   // Manual & documents, only when the game has a manual, a guide or a document of the player's
+    let more = flat.filter { gameMenuMoreIDs.contains($0.id) }
+    home.doors.append(GameMenuItem(id: "door.more", title: "More", subtitle: gameMenuMoreSummary, symbol: "ellipsis.circle", kind: .submenu([GameMenuSection(id: "more.all", inline: false, items: more)])))
     return home
 }
+
+// The More door's rows (gameMenuSections' last section) and its summary
+#if os(iOS)
+let gameMenuMoreIDs: Set<String> = ["screenshot", "record", GameMenuExit.rowID, "share"]
+let gameMenuMoreSummary = "Screenshot, Recording, Exit to Gate, Share log"
+#else
+let gameMenuMoreIDs: Set<String> = ["screenshot", GameMenuExit.rowID, "log", "quit"]
+let gameMenuMoreSummary = "Screenshot, Exit, Log, Quit"   // Exit: to the Gate, or to Beam after a start from Beam (macExitRow)
+#endif
 
 // A preset change in game (gate-ui §19.3): the launcher's model moves and saves the values (LauncherModel.inGame); the rows the game takes live go into the environment under
 // front_ios.m's lock and apply at once (dm_setting_env, dm_setting_live), the others wait for the next start. Returns what changed now and what waits, as short words
@@ -227,16 +266,28 @@ private let touchControlEnvs: Set<String> = ["DM_TOUCH_SIZE", "DM_TOUCH_OPACITY"
                         kind: .submenu([GameMenuSection(id: "touch.all", inline: false, items: rows.map(\.item))]))
 }
 
-// Gate at start (gate-ui GW28; the row was "Settings screen at start"): ticked while the Gate shows when the app starts, unticked while the player's Skip this screen next time skips it (launcher.skip, stored at once:
-// LauncherModel.skipAtStart). Picking it brings the screen back at the next start, or skips it again. Greyed while DM_LAUNCHER from an env file or the launch decides
-// (LauncherModel.launcherSetByEnv); main.m's own DM_LAUNCHER=0 for a start from a program record skips only that start, so the row stays the player's then
-@MainActor func settingsAtStartRow(_ m: LauncherModel) -> GameMenuItem {
-    let env = ProcessInfo.processInfo.environment
-    let fixed = LauncherModel.launcherSetByEnv(environment: env)
-    let on = fixed ? env["DM_LAUNCHER"] != "0" : !m.skipAtStart
-    return GameMenuItem(id: "atstart", title: "Gate at start", subtitle: fixed ? "Set by an env file" : nil, symbol: "slider.horizontal.3", disabled: fixed, kind: .toggle(on)) { _ in
-        m.skipAtStart.toggle()
+// Exit and return to Gate (the owner, 2026-11-27; the row was Gate at start, which stays on the Gate itself: Skip this screen next time). The row opens a confirmation page of
+// the panel (GameMenuPanel.swift: the question and its warning head the page, Keep Playing has the focus, B and the ‹ go back without exiting); Exit to Gate, in the second
+// accent, ends the game. The game cannot be unloaded inside the process, and iOS cannot start the process again, so the iPhone and iPad end it as oe::ExecuteProgram's
+// hand-over does and show the Gate at the next start, once (front_ios.m dm_exit_to_gate, LauncherModel.gateNextKey); the Mac quits and opens the app again at its settings
+// window, or goes back to Beam after a start from Beam (macExitToGate). The UIMenu (DM_GAME_MENU=system) shows the page as a submenu of the two
+enum GameMenuExit {
+    static let rowID = "exit", yesID = "exit.yes", noID = "exit.no"
+    static let title = "Exit and return to Gate", note = "Ends the game; unsaved progress is lost"
+    static let question = "Exit the game?", warning = "Progress since your last save is lost."
+
+    @MainActor static func make(title: String = Self.title, note: String = Self.note, yes yesTitle: String = "Exit to Gate", exit: @escaping @MainActor () -> Void) -> GameMenuItem {
+        let leave = GameMenuItem(id: Self.yesID, title: yesTitle, symbol: "rectangle.portrait.and.arrow.right", closesMenu: true) { _ in exit() }
+        let stay = GameMenuItem(id: Self.noID, title: "Keep Playing", symbol: "gamecontroller")   // GameMenuPanelModel.activate: back a page
+        return GameMenuItem(id: Self.rowID, title: title, subtitle: note, symbol: "rectangle.portrait.and.arrow.right",
+                            kind: .submenu([GameMenuSection(id: Self.rowID + ".confirm", inline: false, items: [leave, stay])]))
     }
+}
+
+#if os(iOS)
+// The More page's Gate row (the name kept from Gate at start: the menu's sections call it), on an app with a Gate (a launcher model)
+@MainActor func settingsAtStartRow(_ m: LauncherModel) -> GameMenuItem {
+    GameMenuExit.make { dm_exit_to_gate() }
 }
 
 // Share log: the in-game menu's last row. One share sheet with Documents/log.txt and log.prev.txt (the run before this one, which main.m keeps under that name at each start: a run
@@ -276,11 +327,69 @@ private let touchControlEnvs: Set<String> = ["DM_TOUCH_SIZE", "DM_TOUCH_OPACITY"
     let listed = files.map { $0.lastPathComponent }.joined(separator: ", ")
     fputs("share log: \(listed)\n", stderr)
 }
+#else
+// The Mac's More rows: Take Screenshot (front_mac.m's own, as Capture and ⇧⌘S take it), Exit and return to Gate, Show log, Quit
+@MainActor func macMoreRows() -> [GameMenuItem] {
+    let shot = GameMenuItem(id: "screenshot", title: "Take Screenshot", subtitle: "Saved in the game's Captures folder", symbol: "camera", closesMenu: true) { _ in dm_mac_capture() }
+    let log = GameMenuItem(id: "log", title: "Show log", subtitle: "The log in Finder, for a bug report", symbol: "doc.text.magnifyingglass", closesMenu: true) { _ in macShowLog() }
+    let name = (Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String) ?? (Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String) ?? "the game"
+    let quit = GameMenuItem(id: "quit", title: "Quit \(name)", subtitle: "As ⌘Q: unsaved progress is lost", symbol: "power", closesMenu: true) { _ in NSApp.terminate(nil) }
+    return [shot, macExitRow(), log, quit]
+}
+
+// Exit and return to Gate on the Mac (GameMenuExit): after a start from Beam (GamePlayer.swift sets DM_STARTED_BY=beam, with DM_LAUNCHER=0) the game quits and Beam comes to the
+// front, its Home; otherwise the game quits and the app opens again at its settings window, once (launcher.c, once the host has ended and the save went to the cloud)
+enum MacExitTarget: Equatable, Sendable {
+    case beam, gate
+    static let beamBundleID = "org.nx18.beam"
+    nonisolated static func of(_ environment: [String: String]) -> MacExitTarget { environment["DM_STARTED_BY"] == "beam" ? .beam : .gate }
+}
+
+@MainActor func macExitRow() -> GameMenuItem {
+    MacExitTarget.of(ProcessInfo.processInfo.environment) == .beam
+        ? GameMenuExit.make(title: "Exit and return to Beam", note: "Ends the game; unsaved progress is lost", yes: "Exit to Beam") { macExitToGate() }
+        : GameMenuExit.make { macExitToGate() }
+}
+
+// The exit itself: the same orderly quit as the Quit row (NSApp terminate: the save writer and the other exit handlers run as for ⌘Q). For the Gate, the one-shot key first,
+// written through to the preferences store before the quit, which launcher.c reads once the host has ended. For Beam, Beam is brought forward first, while this app is still the
+// active one (the system's cooperative activation lets the active app hand over); a Beam no longer running is opened
+@MainActor func macExitToGate() {
+    switch MacExitTarget.of(ProcessInfo.processInfo.environment) {
+    case .beam:
+        if let beam = NSRunningApplication.runningApplications(withBundleIdentifier: MacExitTarget.beamBundleID).first {
+            _ = beam.activate(from: NSRunningApplication.current, options: [])
+        } else if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: MacExitTarget.beamBundleID) {
+            NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration())
+        }
+        fputs("game menu: exit chosen; the game quits and Beam comes to the front\n", stderr)
+    case .gate:
+        UserDefaults.standard.set(true, forKey: LauncherModel.gateNextKey)
+        CFPreferencesAppSynchronize(kCFPreferencesCurrentApplication)
+        fputs("game menu: exit chosen; the game quits and the app opens again at the settings window\n", stderr)
+    }
+    NSApp.terminate(nil)
+}
+
+// Show log: this run's log (~/Library/Logs/nxnative/<title ID>.log, launcher.c) selected in Finder, which docs/playing.md asks for in a bug report. The path is not logged
+@MainActor func macShowLog() {
+    guard let id = Bundle.main.object(forInfoDictionaryKey: "DMTitleID") as? String, !id.isEmpty else { return }
+    let logs = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/nxnative", isDirectory: true)
+    let log = logs.appendingPathComponent("\(id).log")
+    NSWorkspace.shared.activateFileViewerSelecting([FileManager.default.fileExists(atPath: log.path) ? log : logs])
+    fputs("show log: in Finder\n", stderr)
+}
+#endif
 
 // Cheats: the Atmosphère cheat file of this build in the cheats folder (Documents/cheats, which main.m makes; in the Files app under the app's name), as the Mac's Cheats menu
 // shows it (front_mac.m): one row per cheat, a tap turns it on or off and is remembered (<build ID>.enabled); a "{master}" code is always on; a cheat that cannot run here
 // shows why, disabled (the iPhone's code pages are signed, so a cheat that rewrites code runs only on the Mac: pack a code patch into the app instead, the NSP script's mods
 // folder). An on / off pair is one row; a "set" cheat runs once when tapped. Then the master switch and Reload, which reads the folder again after a file was copied in.
+#if os(iOS)
+private let cheatsPlace = "Files app › this app › cheats"
+#else
+private let cheatsPlace = "Cheats menu › Open cheats folder"   // front_mac.m's Cheats menu
+#endif
 private let cheatLabel: Int32 = 1, cheatPairOff: Int32 = 16, cheatOnce: Int32 = 32   // dm.h DM_CHEAT_*
 
 @MainActor private func cheatsMenu() -> GameMenuItem? {
@@ -290,7 +399,7 @@ private let cheatLabel: Int32 = 1, cheatPairOff: Int32 = 16, cheatOnce: Int32 = 
     let n = Int(dm_cheats_ncheats())
     if dm_cheats_found() == 0 || n == 0 {
         var rows = [GameMenuItem(id: "cheats.none", title: build.isEmpty ? "No cheat file" : "No cheats for build \(build)",
-                                 subtitle: "Files app › this app › cheats › \(build.isEmpty ? "<build ID>" : build).txt, then Reload", disabled: true)]
+                                 subtitle: "\(cheatsPlace) › \(build.isEmpty ? "<build ID>" : build).txt, then Reload", disabled: true)]
         let others = Int(dm_cheats_nothers())
         if others > 0 {
             rows.append(GameMenuItem(id: "cheats.others", title: others == 1 ? "1 file is for another game version" : "\(others) files are for other game versions", disabled: true))

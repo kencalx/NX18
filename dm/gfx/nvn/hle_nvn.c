@@ -980,12 +980,20 @@ static NVNsyncWaitResult sync_expired(const sync_t *o, uint64_t timeout, uint64_
     static _Atomic int n;
     if (timeout >= 1000000000ull && atomic_fetch_add(&n, 1) < 8)
         LOG("[RED] nvnSyncWait: a %.1f s wait on sync %p expired after %.1f s (%s, fence %#llx)", timeout / 1e9, (const void *)o, waited / 1e9,
-            o->fenced == 0 ? "never fenced since its Initialize" : o->fenced == 3 ? "its queue receipt not published" : "its fence not reached", (unsigned long long)o->fence);
+            o->fenced == 0 ? "never fenced since its Initialize" : o->fenced == 3 ? "its queue receipt not published" : o->fenced == 4 ? "its acquire's wait not done" : "its fence not reached", (unsigned long long)o->fence);
     return NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED;
 }
 static int gpu_wait_begin(void); static void gpu_wait_end(int began);   // the game's GPU waits give its core away while they block (nvn_acquire_block, below)
+static NVNsyncWaitResult acq_sync_wait(const sync_t *o, uint64_t timeout);   // a deferred acquire's sync (fenced 4: nvnWindowAcquireTexture, DM_NVN_ACQ_DEFER)
+static void acq_sync_waited(const sync_t *o, uint64_t timeout);   // arms the deferred acquire once the game waits on an acquire's sync on the CPU
+static NVNsyncWaitResult sync_wait_plain(const sync_t *o, uint64_t timeout);
 NVN(nvnSyncWait, NVNsyncWaitResult, const NVNsync *s, uint64_t timeout) {
     const sync_t *o = (const sync_t *)s;
+    if (o->fenced == 4) return acq_sync_wait(o, timeout);
+    acq_sync_waited(o, timeout);
+    return sync_wait_plain(o, timeout);
+}
+static NVNsyncWaitResult sync_wait_plain(const sync_t *o, uint64_t timeout) {
     // Never fenced since its Initialize: no GPU work stands behind it, so it is signalled. PRAGMATA initializes its two frame syncs again at a screen change (the Initial Settings
     // menu's Next) and then waits 15 s on the one it has not fenced yet, aborting on TIMEOUT_EXPIRED or FAILED (main+0x4a8cf0) once two frames are in flight: a shipped path,
     // so on the console that wait does not expire. Answered as a timeout (the host's rule from its first version, with no game behind it), the game aborted at once
@@ -2242,6 +2250,11 @@ _Static_assert(DM_QUIT_ARCH_MS == MTL_QUIT_ARCH_MS, "a graceful exit gives the p
 // The first submission's prepare step (mtl_prepare: the prewarm and the pipeline prebuild) loads shaders and builds pipelines and submits no GPU work, so it runs under the lock but outside the
 // graphics gate: inside it, going to the background meanwhile (dm_gfx_suspend, on the main thread) waited for it, minutes on a first start. It stays host work for the guest scheduler. The lock
 // comes before the gate: a second submission waiting for it must not count as in flight, or the suspend waits for it while the first waits to enter the closed gate holding the lock
+// The deferred acquire (hle_nvn.c, below nvnWindowAcquireTexture) as the queue sees it: a sync that holds one (fenced 4) gives the receipts it waits for to a queue wait
+typedef struct acq_defer acq_defer_t;
+static void acq_defer_ref(acq_defer_t *aw);
+static void acq_defer_unref_take(acq_defer_t *aw, uint64_t *tk, uint64_t *nx);
+static void acq_defer_snap(acq_defer_t *aw, uint64_t *tk, uint64_t *nx, uint64_t *gf);
 #include "nvn_queue.inc"
 NVN(nvnQueueSubmitCommands, void, NVNqueue *q, int n, const NVNcommandHandle *h) {
     ((queue_t *)q)->submits++;
@@ -2394,7 +2407,7 @@ void mtl_res_stats(char *out, size_t n); int mtl_fwire_stats(char *out, size_t n
 void mtl_barrier_stats(uint64_t *skip, uint64_t *full);
 extern uint32_t mtl_present_qos(void);
 static _Atomic uint64_t g_frame;
-static uint64_t g_acq_wait_ns, g_pq_wait_ns;   // Accumulated display-link wait / wait for the present queue to return the texture inside acquire (with a snapshot present, for its copy to run on the GPU: mtl_present_wait_texture), recorded per frame at present (there can be several acquires within one frame)
+static _Atomic uint64_t g_acq_wait_ns, g_pq_wait_ns;   // Accumulated display-link wait / wait for the present queue to return the texture inside acquire (with a snapshot present, for its copy to run on the GPU: mtl_present_wait_texture), recorded per frame at present (there can be several acquires within one frame)
 static uint64_t g_fs_start, g_fs_wait, g_fs_away;   // frame step (fstep_tick): when the first acquire after a present returned (the frame's start, 0 = none yet), its pacing wait, and away_ns then
 uint64_t dm_nvn_frame_count(void) { return g_frame; }
 // The frame workgroup (the host's frame_wg.c; profile key frame_wg, DM_FRAME_WG=1 / 0 overriding it; off for every game): one work interval, finished just before the acquire's pacing
@@ -2471,7 +2484,7 @@ static void acq_demote_check(void) {
     atomic_fetch_add_explicit(&g_acq_chk, 1, memory_order_relaxed);
     if (xi.pth_policy != POLICY_RR || xi.pth_curpri < 97) atomic_fetch_add_explicit(&g_acq_dem, 1, memory_order_relaxed);
 }
-// A window's present tickets (ticket, next_ticket, last_pres): the present and acquire threads can differ. Taken before nq_mu, never inside it
+// A window's present tickets (ticket, next_ticket, last_pres) and its deferred acquire (pending_acq): the present and acquire threads can differ. Taken before nq_mu, never inside it
 static pthread_mutex_t g_win_tk_mu = PTHREAD_MUTEX_INITIALIZER;
 // DM_NVN_ACQ_NEXT (on by default): an acquired image's sync is the GPU end of the present after the image's last one, as Horizon's (nvnWindowAcquireTexture)
 static int acq_next_on(void) {
@@ -2479,28 +2492,14 @@ static int acq_next_on(void) {
     if (on < 0) { const char *e = getenv("DM_NVN_ACQ_NEXT"); on = !e || atoi(e) != 0; if (!on) LOG("DM_NVN_ACQ_NEXT=0: an acquired image's sync is the commits at the acquire (the old acquire fence)"); }
     return on;
 }
-NVN(nvnWindowAcquireTexture, NVNwindowAcquireTextureResult, NVNwindow *w, NVNsync *s, int *idx) {
-    win_t *o = (win_t *)w;
-    int n = window_active(o);
-    *idx = n ? o->next++ % n : 0;
-    // Vsync blocks here (real-device NVN: when all textures in the swapchain are waiting for display, wait for the next one to be released), not in present -- the game often calls present while holding a lock
+// The acquire's display waits (pacing): the display link's ticks for the present interval, or the image's slot time on the host's clock, the screen-depth and snapshot-ring waits,
+// the frame workgroup's end and start around them. at: the image's slot time (avail); rtp / rtp_own: the acquire's real-time period (DM_FRAME_WG_PERIOD's, and its own). Returns the
+// time it spent pacing (the frame step's g_fs_wait). Run by the acquire, or for a deferred acquire by the wait that takes it over (acq_defer_settle), with t_acq_in set by the caller
+static uint64_t acq_pace(win_t *o, uint64_t at, uint64_t rtp, uint64_t rtp_own) {
     int det = dm_detclock_enabled();
-    uint64_t at = *idx < 4 ? o->avail[*idx] : 0, now = det ? guest_ns() : now_ns(), wait = at > now ? at - now : 0, pace_ns = 0;
-    { static pthread_t acq_th; if (!pthread_equal(acq_th, pthread_self())) { if (acq_th) atomic_fetch_add_explicit(&g_acq_moves, 1, memory_order_relaxed); acq_th = pthread_self(); } }   // rt_policy_line counts them
-    dm_thread_acquire_mark();   // every acquire, not only when the pthread changes: a new acquirer can reuse an exited guest thread's pthread_t (a TLS read and a compare)
-    dm_tcore_sample(DM_TCORE_MAIN, atomic_load_explicit(&g_frame, memory_order_relaxed));   // the threads line's core placement (at most once a frame)
-    // The waits below give the core away when they block (nvn_acquire_block). Not under the deterministic clock: its waits are the DM_DETCLOCK_PACE floor (a host wall-clock
-    // floor that gives the loader time, not a display wait) and the present queue's return, and whether either blocks depends on the host's load; marked then, whether a
-    // same-core waker is let go at the acquire or held until the acquirer's next guest wait would too, and the screenshot gate's capture with it. Never marked, as before
-    t_acq_in = !det;
-    if (!det) {   // Register the acquire thread as a time-constraint thread (no longer registered only when it "arrived early": it must also declare itself when it is constantly behind in the hot state)
-        static uint64_t rt_period; uint64_t period = present_period(o), rtp = rt_period_ns(o, period), rtp_own = rtp;
-        if (rtp) { uint64_t wp = frame_wg_period(); if (wp) rtp = wp; }   // DM_FRAME_WG_PERIOD: one deadline at any interval (the policy, the replay threads' and the workgroup's)
-        static __thread int wg_seen; int wg_new = rtp && !wg_seen && frame_wg_on(); if (wg_new) wg_seen = 1;   // the frame workgroup: each thread that acquires gets the policy, and joins, at its first acquire
-        if (rtp && (rt_period != rtp || wg_new)) { rt_period = rtp; set_time_constraint(rtp); }   // (otherwise an acquire that moved to a thread with the same period would only ever skip)
-        if (rtp) atomic_store_explicit(&g_rt_frame_ns, rtp, memory_order_relaxed);
-        rt_comp_tick(rtp);
-        if (rtp) acq_demote_check();
+    uint64_t now = det ? guest_ns() : now_ns(), wait = at > now ? at - now : 0, pace_ns = 0;
+    if (!det) {
+        uint64_t period = present_period(o);
         static uint64_t wg_frame = UINT64_MAX; uint64_t wf = atomic_load_explicit(&g_frame, memory_order_relaxed); int wgb = frame_wg_on() && wf != wg_frame;   // the frame workgroup: one interval a frame (acquire can run more than once in one)
         if (wgb) { wg_frame = wf; dm_frame_wg_end(); }   // the frame before ends at its pacing wait
         uint64_t p0 = now_ns(); int snap = mtl_snap_on();
@@ -2522,16 +2521,186 @@ NVN(nvnWindowAcquireTexture, NVNwindowAcquireTextureResult, NVNwindow *w, NVNsyn
         if (pace) { if (last && now_ns() < last + step) sleep_until_ns(last + step); last = now_ns(); }
     }
     pace_ns += mtl_snap_acquire_wait();   // ring capacity is waited for at acquire, where the game does not hold its present lock
-    g_acq_wait_ns += wait;
+    atomic_fetch_add_explicit(&g_acq_wait_ns, wait, memory_order_relaxed);
     uint64_t woke = wait ? now_ns() : at;
     trow(g_frame, "@late_ms", woke > at ? (woke - at) / 1e6 : 0);   // a display-link tick can wake the acquire before the slot
-    // The previous present of this texture has not yet been processed by the present thread (display cannot keep up, a whole swapchain round behind): wait for it to be returned, then hand it to the game to draw
+    return pace_ns;
+}
+// The previous present of this texture has not yet been processed by the present thread (display cannot keep up, a whole swapchain round behind): wait for it to be returned before the game draws into it
+static void acq_ticket_wait(uint64_t tk) { if (tk) { uint64_t w0 = now_ns(); nvn_queue_present_wait(tk); atomic_fetch_add_explicit(&g_pq_wait_ns, now_ns() - w0, memory_order_relaxed); } }
+static void acq_display_leave(void) { t_acq_in = 0; if (t_acq_blocked) { t_acq_blocked = 0; dm_thread_display_wait(0); } }   // back from the display: runnable before the game's code runs again
+static void acq_frame_start(uint64_t pace_ns) { if (!g_fs_start) { g_fs_start = now_ns(); g_fs_wait = pace_ns; g_fs_away = away_ns(); } }   // the frame starts when the first acquire wait after a present returns: on a display-link tick when on time
+
+// ---------- Deferred acquire (DM_NVN_ACQ_DEFER, on by default; upstream c17a54984, a hand port) ----------
+// On Horizon nvnWindowAcquireTexture returns the image at once, and the wait until the display has let it go is the returned sync's: nvnSyncWait on the CPU or nvnQueueWaitSync
+// on the GPU. The host's acquire waited itself (the display link's ticks for the present interval, the image's own last present). A game that times its CPU frame across the acquire
+// and only then waits on the acquire's sync counted that wait as CPU time: Super Mario Bros. Wonder – Nintendo Switch 2 Edition's sead::GameFrameworkNx (main+0x1bba10) acquires
+// before it records the frame and waits on the sync in waitDrawDone_; after one slow frame its interval controller (main+0x1bbee0, interval set at main+0x1bc1f0) saw every frame
+// take 33 ms with the wait, set present interval 2 and never stepped back to 1 (the owner's iPhone 18 Pro Max: 30 fps from 13 s in).
+// Deferred, the acquire picks the image, takes over its own last present (tk) and the present after it (nx) at once, before a present thread can present the image again, and hands
+// the rest to the sync (fenced 4, acq_defer_t): the first nvnSyncWait on it runs the acquire's waits exactly as the acquire did (acq_pace, the ticket wait) and then waits for the
+// GPU part of the old sync (nx's GPU end, else the commits when the wait ended, or at the acquire once the game has submitted since). A queue wait on it (nvnQueueWaitSync, a command buffer's WaitSync) does not run the pacing: the queue
+// waits for the image's last present to give its texture back and for the GPU part (nvn_queue.inc nq_snapshot_sync), and a wait nobody took on the CPU runs at the window's next
+// acquire, so each frame still takes one display wait. NX 18 differs from upstream: it defers only once the game has waited on an acquire's sync on the CPU with a timeout
+// (acq_sync_waited, g_acq_armed): a game that never does keeps the acquire's wait exactly as before; a null sync (nvnQueueAcquireTexture, NVN 53), and the deterministic clock,
+// keep it too. A poll (timeout 0) or a finite wait on a deferred acquire whose wait has not run runs it whole (what the acquire took before), not upstream's non-blocking readiness
+// checks. Frame generation, present repeat and snapshots are present-side and unchanged; a frame cap (Battery Saver's 30, the heat ladder's 30 fps rung) is read by the pacing when
+// it runs, so it caps as before. Lock order: g_win_tk_mu, then nq_mu, then g_acq_mu (a leaf: nothing is taken inside it)
+struct acq_defer {
+    win_t *win;            // the window, NULL once the wait has run or the window was finalized
+    int idx, want_next, state;   // state 0 not run, 1 running, 2 done; want_next: the image had no next present at the acquire, so the window's next present of another image becomes it
+    unsigned refs;         // the window's pending_acq, the sync (fenced 4) and each thread waiting on it
+    uint64_t at, tk, nx, gf, rtp, rtp_own, subs;   // the image's slot time; its own last present and the present after it (receipts it owns); the commits (at the acquire, then when the wait ended if the game submitted nothing since: subs); the real-time period
+};
+static pthread_mutex_t g_acq_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_acq_cv = PTHREAD_COND_INITIALIZER;
+static _Atomic int g_acq_armed;   // the game waited on an acquire's sync on the CPU with a timeout: acquires with a sync defer from then on
+static _Atomic uint64_t g_acq_deferred, g_acq_drained;   // deferred acquires; of them, the waits the window's next acquire ran (no CPU wait took them)
+static int acq_defer_on(void) {
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("DM_NVN_ACQ_DEFER"); on = !e || atoi(e) != 0; if (!on) LOG("DM_NVN_ACQ_DEFER=0: the acquire takes its display wait itself, also for a game that waits on the acquire's sync on the CPU"); }
+    return on;
+}
+// The acquires' syncs as set (pointer and fence), for acq_sync_waited: the last four, while not armed
+static struct { _Atomic uintptr_t s; _Atomic uint64_t fence; } g_acq_sync_rec[4]; static _Atomic unsigned g_acq_sync_n;
+static void acq_sync_note(const sync_t *s) {
+    if (atomic_load_explicit(&g_acq_armed, memory_order_relaxed) || !acq_defer_on()) return;
+    unsigned k = atomic_fetch_add_explicit(&g_acq_sync_n, 1, memory_order_relaxed) & 3;
+    atomic_store(&g_acq_sync_rec[k].s, 0); atomic_store(&g_acq_sync_rec[k].fence, s->fence); atomic_store(&g_acq_sync_rec[k].s, (uintptr_t)s);
+}
+static void acq_sync_waited(const sync_t *o, uint64_t timeout) {
+    if (!timeout || (o->fenced != 2 && o->fenced != 3) || atomic_load_explicit(&g_acq_armed, memory_order_relaxed) || !acq_defer_on()) return;
+    for (int k = 0; k < 4; k++) if (atomic_load(&g_acq_sync_rec[k].s) == (uintptr_t)o && atomic_load(&g_acq_sync_rec[k].fence) == o->fence) {
+        int was = 0;
+        if (atomic_compare_exchange_strong(&g_acq_armed, &was, 1))
+            LOG("[nvn] the game waits on its acquired image's sync on the CPU (nvnSyncWait): from its next acquire the acquire returns at once and its display wait is that wait's, as on the console (DM_NVN_ACQ_DEFER=0 keeps it in the acquire)");
+        return;
+    }
+}
+static void acq_defer_ref(acq_defer_t *aw) { pthread_mutex_lock(&g_acq_mu); aw->refs++; pthread_mutex_unlock(&g_acq_mu); }
+// Drops a reference; with the last one the receipts it still holds go to the caller (*tk, *nx), to be released under nq_mu or with nvn_queue_present_release
+static void acq_defer_unref_take(acq_defer_t *aw, uint64_t *tk, uint64_t *nx) {
+    *tk = *nx = 0;
+    pthread_mutex_lock(&g_acq_mu);
+    int last = !--aw->refs;
+    if (last) { *tk = aw->tk; *nx = aw->nx; }
+    pthread_mutex_unlock(&g_acq_mu);
+    if (last) free(aw);
+}
+static void acq_defer_unref(acq_defer_t *aw) { uint64_t tk, nx; acq_defer_unref_take(aw, &tk, &nx); nvn_queue_present_release(tk); nvn_queue_present_release(nx); }
+static void acq_defer_snap(acq_defer_t *aw, uint64_t *tk, uint64_t *nx, uint64_t *gf) { pthread_mutex_lock(&g_acq_mu); *tk = aw->tk; *nx = aw->nx; *gf = aw->gf; pthread_mutex_unlock(&g_acq_mu); }
+// Runs a deferred acquire's waits once, on the first thread to come (the game's nvnSyncWait, the window's next acquire); one that comes while they run waits for them.
+// Returns whether this call waited
+static int acq_defer_settle(acq_defer_t *aw) {
+    int waited = 0;
+    pthread_mutex_lock(&g_acq_mu);
+    while (aw->state == 1) { waited = 1; pthread_cond_wait(&g_acq_cv, &g_acq_mu); }
+    if (aw->state == 2) { pthread_mutex_unlock(&g_acq_mu); return waited; }
+    aw->state = 1;
+    win_t *o = aw->win; const uint64_t at = aw->at, tk = aw->tk, rtp = aw->rtp, rtp_own = aw->rtp_own;
+    pthread_mutex_unlock(&g_acq_mu);
+    uint64_t pace_ns = 0;
+    if (o) {   // the same waits, in the same order, as an acquire that does not defer (deferral is off under the deterministic clock, so t_acq_in is 1)
+        t_acq_in = 1;
+        pace_ns = acq_pace(o, at, rtp, rtp_own);
+        acq_ticket_wait(tk);
+        waited |= t_acq_blocked;
+        acq_display_leave();
+    }
+    uint64_t gf = mtl_last_fence(), rel;
+    pthread_mutex_lock(&g_acq_mu);
+    rel = aw->tk; aw->tk = 0;
+    // No present after the image's last one yet: the commits now, as the acquire's sync was after its waits, but only while the game has submitted nothing since the acquire. A wait
+    // after the game recorded and submitted its frame (Wonder's waitDrawDone_) took the commits of that frame too, so the CPU waited for the GPU to finish the frame it had just
+    // submitted (every frame with DM_NVN_ACQ_NEXT=0, where nx is always 0): the acquire's commits then, as upstream c17a54984 keeps them
+    if (!aw->nx && atomic_load_explicit(&nq_stat_submits, memory_order_relaxed) == aw->subs) aw->gf = gf;
+    aw->want_next = 0; aw->win = NULL; aw->state = 2;
+    pthread_cond_broadcast(&g_acq_cv);
+    pthread_mutex_unlock(&g_acq_mu);
+    nvn_queue_present_release(rel);
+    if (o) acq_frame_start(pace_ns);
+    return waited;
+}
+// A deferred acquire on this window whose waits no CPU wait took (the game waited on its sync on the GPU only, or not at all): they run at the next acquire, so each frame still
+// takes one display wait. Before the window lets it go, so a present meanwhile can still become its next present
+static void acq_defer_drain(win_t *o) {
+    pthread_mutex_lock(&g_win_tk_mu);
+    acq_defer_t *aw = o->pending_acq; if (aw) acq_defer_ref(aw);
+    pthread_mutex_unlock(&g_win_tk_mu);
+    if (!aw) return;
+    pthread_mutex_lock(&g_acq_mu); int run = aw->state == 0; pthread_mutex_unlock(&g_acq_mu);
+    if (run) atomic_fetch_add_explicit(&g_acq_drained, 1, memory_order_relaxed);
+    acq_defer_settle(aw);
+    pthread_mutex_lock(&g_win_tk_mu);
+    int mine = o->pending_acq == aw; if (mine) o->pending_acq = NULL;
+    pthread_mutex_unlock(&g_win_tk_mu);
+    if (mine) acq_defer_unref(aw);   // the window's reference
+    acq_defer_unref(aw);
+}
+static void acq_defer_start(win_t *o, int idx, NVNsync *s, uint64_t rtp, uint64_t rtp_own) {
+    acq_defer_t *aw = calloc(1, sizeof *aw);
+    if (!aw) die("deferred acquire allocation failed");
+    aw->win = o; aw->idx = idx; aw->rtp = rtp; aw->rtp_own = rtp_own; aw->refs = 2;   // the window's and the sync's
+    aw->subs = atomic_load_explicit(&nq_stat_submits, memory_order_relaxed); aw->gf = mtl_last_fence();   // until the wait has run: the commits so far (a queue wait on the sync meanwhile)
+    uint64_t drop = 0;
+    pthread_mutex_lock(&g_win_tk_mu);
+    if (idx < 4) { aw->at = o->avail[idx]; aw->tk = o->ticket[idx]; aw->nx = o->next_ticket[idx]; o->ticket[idx] = 0; o->next_ticket[idx] = 0; }   // taken over here: a present meanwhile cannot release them
+    if (!acq_next_on()) { drop = aw->nx; aw->nx = 0; }
+    aw->want_next = !aw->nx && aw->tk && acq_next_on();
+    o->pending_acq = aw;
+    pthread_mutex_unlock(&g_win_tk_mu);
+    nvn_queue_present_release(drop);
+    nvn_sync_set_acq((sync_t *)s, (uintptr_t)aw);
+    atomic_fetch_add_explicit(&g_acq_deferred, 1, memory_order_relaxed);
+}
+// nvnSyncWait on a deferred acquire's sync: the acquire's waits (if no one has run them yet), then the GPU part of its sync, with what is left of the timeout
+static NVNsyncWaitResult acq_sync_wait(const sync_t *o, uint64_t timeout) {
+    acq_defer_t *aw = (acq_defer_t *)(uintptr_t)nvn_sync_ref_acq(o);
+    if (!aw) return sync_wait_plain(o, timeout);   // fenced again meanwhile
+    uint64_t t0 = now_ns();
+    int waited = acq_defer_settle(aw);
+    pthread_mutex_lock(&g_acq_mu); uint64_t nx = aw->nx, gf = aw->gf; pthread_mutex_unlock(&g_acq_mu);
+    sync_t t = {MAGIC('S', 'Y', 'N', 'C'), 0, 0};
+    if (nx) nvn_sync_set_present(&t, nx);   // the GPU end of the present after the image's last one (DM_NVN_ACQ_NEXT)
+    else if (gf) { t.fenced = 2; t.fence = gf; }
+    uint64_t el = now_ns() - t0, rem = timeout == UINT64_MAX ? UINT64_MAX : el >= timeout ? 0 : timeout - el;
+    NVNsyncWaitResult r = sync_wait_plain(&t, rem);
+    nvn_sync_release(&t);
+    acq_defer_unref(aw);
+    return r == NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED && waited ? NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED : r;
+}
+NVN(nvnWindowAcquireTexture, NVNwindowAcquireTextureResult, NVNwindow *w, NVNsync *s, int *idx) {
+    win_t *o = (win_t *)w;
+    acq_defer_drain(o);
+    int n = window_active(o);
+    *idx = n ? o->next++ % n : 0;
+    // Vsync blocks here (real-device NVN: when all textures in the swapchain are waiting for display, wait for the next one to be released), not in present -- the game often calls present while holding a lock
+    int det = dm_detclock_enabled();
+    uint64_t at = *idx < 4 ? o->avail[*idx] : 0, rtp = 0, rtp_own = 0;
+    { static pthread_t acq_th; if (!pthread_equal(acq_th, pthread_self())) { if (acq_th) atomic_fetch_add_explicit(&g_acq_moves, 1, memory_order_relaxed); acq_th = pthread_self(); } }   // rt_policy_line counts them
+    dm_thread_acquire_mark();   // every acquire, not only when the pthread changes: a new acquirer can reuse an exited guest thread's pthread_t (a TLS read and a compare)
+    dm_tcore_sample(DM_TCORE_MAIN, atomic_load_explicit(&g_frame, memory_order_relaxed));   // the threads line's core placement (at most once a frame)
+    if (!det) {   // Register the acquire thread as a time-constraint thread (no longer registered only when it "arrived early": it must also declare itself when it is constantly behind in the hot state)
+        static uint64_t rt_period; uint64_t period = present_period(o); rtp = rt_period_ns(o, period); rtp_own = rtp;
+        if (rtp) { uint64_t wp = frame_wg_period(); if (wp) rtp = wp; }   // DM_FRAME_WG_PERIOD: one deadline at any interval (the policy, the replay threads' and the workgroup's)
+        static __thread int wg_seen; int wg_new = rtp && !wg_seen && frame_wg_on(); if (wg_new) wg_seen = 1;   // the frame workgroup: each thread that acquires gets the policy, and joins, at its first acquire
+        if (rtp && (rt_period != rtp || wg_new)) { rt_period = rtp; set_time_constraint(rtp); }   // (otherwise an acquire that moved to a thread with the same period would only ever skip)
+        if (rtp) atomic_store_explicit(&g_rt_frame_ns, rtp, memory_order_relaxed);
+        rt_comp_tick(rtp);
+        if (rtp) acq_demote_check();
+    }
+    if (s && !det && atomic_load_explicit(&g_acq_armed, memory_order_relaxed) && acq_defer_on()) { acq_defer_start(o, *idx, s, rtp, rtp_own); return NVN_WINDOW_ACQUIRE_TEXTURE_RESULT_SUCCESS; }
+    // The waits below give the core away when they block (nvn_acquire_block). Not under the deterministic clock: its waits are the DM_DETCLOCK_PACE floor (a host wall-clock
+    // floor that gives the loader time, not a display wait) and the present queue's return, and whether either blocks depends on the host's load; marked then, whether a
+    // same-core waker is let go at the acquire or held until the acquirer's next guest wait would too, and the screenshot gate's capture with it. Never marked, as before
+    t_acq_in = !det;
+    uint64_t pace_ns = acq_pace(o, at, rtp, rtp_own);
     uint64_t tk = 0, nx = 0;
     pthread_mutex_lock(&g_win_tk_mu);
     if (*idx < 4) { tk = o->ticket[*idx]; nx = o->next_ticket[*idx]; o->ticket[*idx] = 0; o->next_ticket[*idx] = 0; }   // taken over here: a present meanwhile cannot release them
     pthread_mutex_unlock(&g_win_tk_mu);
-    if (tk) { uint64_t w0 = now_ns(); nvn_queue_present_wait(tk); nvn_queue_present_release(tk); g_pq_wait_ns += now_ns() - w0; }
-    t_acq_in = 0; if (t_acq_blocked) { t_acq_blocked = 0; dm_thread_display_wait(0); }   // back from the display: runnable before the game's code runs again
+    acq_ticket_wait(tk); nvn_queue_present_release(tk);
+    acq_display_leave();
     // The sync: Horizon hands an image back once the compositor has taken the next present in its place, so the GPU has finished the frame after the image's last one. Games that
     // pace their CPU-written per-frame data by this sync alone (Xenoblade Chronicles 3, Xenoblade DE: constants in two slots that alternate by frame) need that frame done, not
     // whatever the replay had committed at this call (mtl_last_fence() can trail what the game submitted while the queue worker is behind, or over-wait with three images).
@@ -2539,18 +2708,27 @@ NVN(nvnWindowAcquireTexture, NVNwindowAcquireTextureResult, NVNwindow *w, NVNsyn
     if (s) {
         if (nx && acq_next_on()) nvn_sync_set_present((sync_t *)s, nx);
         else { nvn_sync_release((sync_t *)s); ((sync_t *)s)->fenced = 2; ((sync_t *)s)->fence = mtl_last_fence(); }   // the commits before this point (fenced 2: an acquire sync, for the wait ledger)
+        acq_sync_note((const sync_t *)s);   // a CPU wait on it arms the deferred acquire (acq_sync_waited)
     }
     if (nx) nvn_queue_present_release(nx);
-    if (!g_fs_start) { g_fs_start = now_ns(); g_fs_wait = pace_ns; g_fs_away = away_ns(); }   // the frame starts when the first acquire after a present returns: on a display-link tick when on time
+    acq_frame_start(pace_ns);
     return NVN_WINDOW_ACQUIRE_TEXTURE_RESULT_SUCCESS;
 }
 // The older API (NVN 53, Super Mario 3D World + Bowser's Fury): the queue waits for the texture on the GPU and no sync object is handed out. The host replays in submission order, so later commands already come after earlier presents; the same as WindowAcquireTexture without a sync object
 NVN(nvnWindowFinalize, void, NVNwindow *w) {
-    win_t *o=(win_t *)w; uint64_t drop[8]; int nd=0;
+    win_t *o=(win_t *)w; uint64_t drop[9]; int nd=0;
     pthread_mutex_lock(&g_win_tk_mu);
+    acq_defer_t *aw=o->pending_acq; o->pending_acq=NULL;
     for(int i=0;i<4;i++) { drop[nd++]=o->ticket[i]; drop[nd++]=o->next_ticket[i]; o->ticket[i]=0; o->next_ticket[i]=0; }
     o->last_pres=0;
     pthread_mutex_unlock(&g_win_tk_mu);
+    if(aw) {   // a deferred acquire not waited for: let go of it (one running finishes first); a wait on its sync later finds it done
+        pthread_mutex_lock(&g_acq_mu);
+        while(aw->state==1) pthread_cond_wait(&g_acq_cv,&g_acq_mu);
+        if(aw->state==0) { aw->state=2; aw->win=NULL; aw->want_next=0; drop[nd++]=aw->tk; aw->tk=0; pthread_cond_broadcast(&g_acq_cv); }
+        pthread_mutex_unlock(&g_acq_mu);
+        acq_defer_unref(aw);
+    }
     for(int i=0;i<nd;i++) nvn_queue_present_release(drop[i]);
 }
 NVN(nvnQueueAcquireTexture, NVNqueueAcquireTextureResult, NVNqueue *q, NVNwindow *w, int *idx) {
@@ -4208,11 +4386,23 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     uint64_t t0 = now_ns(), away = away_ns(); static uint64_t prev_away; double bg_ms = (away - prev_away) / 1e6; prev_away = away;   // of the time since the last present, how much the app was away
     if (idx >= 0 && idx < o->ntex && idx < 4) {   // enqueue only, return immediately
         const tex_t *t = CTX(o->tex[idx]); int lc[4]; const int *crop = present_crop(o->crop, (int)t->d.width, (int)t->d.height, lc);
-        uint64_t new_tk = nvn_queue_present((queue_t *)q,t,present_period(o) / 1e9,crop), drop[3] = {0}; int nd = 0, next = acq_next_on() && new_tk;
+        uint64_t new_tk = nvn_queue_present((queue_t *)q,t,present_period(o) / 1e9,crop), drop[4] = {0}; int nd = 0, next = acq_next_on() && new_tk;
         if (next) nvn_queue_present_ref(new_tk);   // a reference for the image presented before this one: this present is its next (DM_NVN_ACQ_NEXT)
         pthread_mutex_lock(&g_win_tk_mu);
         int prev = o->last_pres - 1;
         if (next && prev >= 0 && prev < 4 && prev != idx && o->ticket[prev]) { drop[nd++] = o->next_ticket[prev]; o->next_ticket[prev] = new_tk; next = 0; }
+        // A deferred acquire whose image had no present after its last one (acq_defer_t.want_next; its ticket was taken over, so the rule above cannot see it): this present of
+        // another image is that present, while the acquire's waits have not finished
+        acq_defer_t *pa = o->pending_acq;
+        if (pa && new_tk && acq_next_on()) {
+            pthread_mutex_lock(&g_acq_mu); int give = pa->want_next && pa->idx != idx; pthread_mutex_unlock(&g_acq_mu);
+            if (give) {
+                nvn_queue_present_ref(new_tk);
+                pthread_mutex_lock(&g_acq_mu);
+                if (pa->want_next && pa->idx != idx) { pa->nx = new_tk; pa->want_next = 0; } else drop[nd++] = new_tk;   // its waits finished meanwhile: the reference goes
+                pthread_mutex_unlock(&g_acq_mu);
+            }
+        }
         drop[nd++] = o->ticket[idx]; drop[nd++] = o->next_ticket[idx];   // the image's own last present and the one after it are history now
         o->ticket[idx] = new_tk; o->next_ticket[idx] = 0; o->last_pres = idx + 1;
         pthread_mutex_unlock(&g_win_tk_mu);

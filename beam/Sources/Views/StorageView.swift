@@ -47,12 +47,6 @@ struct StorageView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Text("Storage").font(.title2.weight(.semibold))
-                Spacer()
-                if loading { ProgressView().controlSize(.small) }
-                Button("Refresh", systemImage: "arrow.clockwise") { Task { await load() } }.disabled(loading)
-            }
             Table(rows) {
                 TableColumn("Game", value: \.title)
                 TableColumn("Game files") { r in Text(size(r.game)).monospacedDigit() }.width(100)
@@ -62,12 +56,15 @@ struct StorageView: View {
                     HStack {
                         if let b = r.buildFolder, r.build != nil {
                             Button("Show", systemImage: "folder") { NSWorkspace.shared.activateFileViewerSelecting([b]) }.labelStyle(.iconOnly)
+                                .help("Show the build folder in Finder").accessibilityLabel("Show \(r.title)'s build folder in Finder")
                             Button("Move to Trash", systemImage: "trash") { trashing = r }.labelStyle(.iconOnly)
+                                .help("Move the build folder to the Trash").accessibilityLabel("Move \(r.title)'s build folder to the Trash")
                                 .disabled(library.jobs[r.id]?.isActive ?? false)
                         }
                     }
                 }.width(70)
             }
+            .overlay { if rows.isEmpty && !loading { Text("No games yet. The games you add show here with the space they use.").foregroundStyle(.secondary) } }
             HStack {
                 Text("Build folders: \(size(rows.compactMap(\.build).reduce(0, +))) · Apps: \(size(rows.compactMap(\.output).reduce(0, +)))")
                 Spacer()
@@ -77,6 +74,11 @@ struct StorageView: View {
         }
         .padding(20)
         .frame(minWidth: 640, minHeight: 360)
+        .toolbar {   // the window's own title says Storage; Refresh sits in its toolbar, not a second title in the content (macOS 27 windows)
+            ToolbarItem {
+                if loading { ProgressView().controlSize(.small) } else { Button("Refresh", systemImage: "arrow.clockwise") { Task { await load() } } }
+            }
+        }
         .task { await load() }
         .confirmationDialog("Move \(trashing?.title ?? "this game")'s build folder to the Trash?", isPresented: Binding(get: { trashing != nil }, set: { if !$0 { trashing = nil } })) {
             Button("Move to Trash", role: .destructive) {

@@ -144,7 +144,7 @@ struct SettingsFile: Decodable {
     nonisolated static let presetKey = "launcher.preset", tappedKey = "launcher.presetTapped", presetValuesKey = "launcher.presetValues"
     nonisolated static let presetTableVersion = "1"   // presetValues' "_v": a later build that retunes a preset's values may bump it
     @Published var facts = DeviceFacts()   // the device the rules are decided on (follow), published so a row greys or comes back as a controller or a TV connects
-    // "Skip this screen next time" (launcher.skip): stored as it changes, not at Play, so the in-game menu's "Settings screen at start" can turn it off while the game runs
+    // "Skip this screen next time" (launcher.skip): stored as it changes, not at Play
     @Published var skipAtStart = false {
         didSet { if skipAtStart != oldValue { LauncherModel.setSkipAtStart(skipAtStart, defaults: defaults) } }
     }
@@ -526,6 +526,16 @@ struct SettingsFile: Decodable {
 
     // "Skip this screen next time" (launcher.skip in the app's preferences): the game starts at once with the saved choices, as with DM_LAUNCHER=0
     nonisolated static let skipKey = "launcher.skip"
+    // "Exit and return to Gate" (the in-game menu, GameMenu.swift): the Gate shows at the next start, once, whatever would skip it (Skip this screen next time, the Game shortcut,
+    // DM_LAUNCHER from an env file). Written by the exit (front_ios.m dm_exit_to_gate; the Mac's host, GameMenu.swift macExitToGate), taken away as the Gate shows
+    // (Launcher.swift presentLauncher; dm/mac/Launcher.swift dm_mac_launcher, which launcher.c starts for it)
+    nonisolated static let gateNextKey = "launcher.gateNext"
+    nonisolated static func gateNext(defaults: UserDefaults = .standard) -> Bool { defaults.bool(forKey: gateNextKey) }
+    nonisolated static func clearGateNext(defaults: UserDefaults = .standard) {
+        guard defaults.object(forKey: gateNextKey) != nil else { return }
+        defaults.removeObject(forKey: gateNextKey)
+        fputs("launcher: the Gate shows after Exit and return to Gate (once)\n", stderr)
+    }
     // Whether the settings screen is skipped at start: DM_LAUNCHER from an env file or the launch decides while it is set (0 skips, any other value shows the screen), else the
     // player's choice. A front end may still show the screen when the player asks for it at start (a controller button held: Launcher.swift, best effort)
     nonisolated static func skipsAtStart(defaults: UserDefaults = .standard, environment: [String: String] = ProcessInfo.processInfo.environment) -> Bool {
@@ -541,7 +551,7 @@ struct SettingsFile: Decodable {
         if lists.isEmpty { return true }
         return lists.contains { $0.split(separator: " ").contains("DM_LAUNCHER") }
     }
-    // The player's choice, stored at once (the toggle; the in-game menu's "Settings screen at start" sets false). Off is no key, as the other choices keep only what differs
+    // The player's choice, stored at once (the Gate's Gate at start). Off is no key, as the other choices keep only what differs
     nonisolated static func setSkipAtStart(_ on: Bool, defaults: UserDefaults = .standard) {
         if on { defaults.set(true, forKey: skipKey) } else { defaults.removeObject(forKey: skipKey) }
         fputs("launcher: skip at start \(on ? "on" : "off")\n", stderr)

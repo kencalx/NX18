@@ -31,9 +31,9 @@ struct NXPlayImportSheet: View {
                 if running { ProgressView("Asking NX 18 about each game…").progressViewStyle(.linear) }
                 HStack {
                     Spacer()
-                    Button("Cancel", role: .cancel) { dismiss() }.disabled(running)
+                    Button("Cancel", role: .cancel) { dismiss() }.keyboardShortcut(.cancelAction).disabled(running)
                     Button("Bring Them In") { running = true; Task { result = await library.importNXPlay(lib); running = false } }
-                        .buttonStyle(.glassProminent).disabled(running || lib.games.isEmpty)
+                        .keyboardShortcut(.defaultAction).buttonStyle(.glassProminent).disabled(running || lib.games.isEmpty)
                 }
             }
         }
@@ -90,11 +90,7 @@ struct SideloadGuide: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            HStack {
-                Text("Install with another tool").font(.title2.weight(.semibold))
-                Spacer()
-                Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
-            }
+            Text("Install with another tool").font(.title2.weight(.semibold))
             Picker("Tool", selection: $tool) { ForEach(Tool.allCases) { Text($0.rawValue).tag($0) } }.pickerStyle(.segmented)
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
@@ -117,6 +113,7 @@ struct SideloadGuide: View {
                 Link("Increased Memory Limit steps", destination: URL(string: "https://github.com/kencalx/NX18#increased-memory-limit")!)
                 Spacer()
                 Button("Show IPA", systemImage: "folder") { NSWorkspace.shared.activateFileViewerSelecting([ipa]) }
+                Button("Done") { dismiss() }.keyboardShortcut(.defaultAction).buttonStyle(.glassProminent)   // a sheet's buttons at its bottom trailing edge (macOS 27 dialogs)
             }
             .font(.callout)
         }

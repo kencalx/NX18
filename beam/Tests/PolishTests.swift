@@ -14,6 +14,18 @@ import Testing
         #expect(BeamUpdate.newest(all, current: "0.1")?.tagName == "beam-0.2.1", "drafts, pre-releases and NX 18's own tags left out")
         #expect(BeamUpdate.newest(all, current: "0.2.1") == nil)
     }
+    @Test func feedAndTrust() throws {
+        let json = #"[{"tag_name": "beam-0.2", "html_url": "h", "draft": false, "prerelease": false, "assets": [{"name": "NX18-Beam-0.2.dmg", "browser_download_url": "file:///x.dmg", "digest": "sha256:ab"}]}, {"tag_name": "beam-0.3", "html_url": "h", "draft": false, "prerelease": false, "assets": [{"name": "NX18-Beam-0.2.dmg", "browser_download_url": "file:///y.dmg"}]}]"#
+        let d = JSONDecoder(); d.keyDecodingStrategy = .convertFromSnakeCase
+        let all = try d.decode([BeamRelease].self, from: Data(json.utf8))
+        #expect(all[0].dmg?.digest == "sha256:ab" && all[0].versionString == "0.2", "GitHub's asset list and digest read")
+        #expect(all[1].dmg == nil, "a DMG named for another version is not this release's")
+        #expect(rel("beam-0.4").dmg == nil, "no assets: link only")
+        #expect(BeamUpdate.requirement(team: nil) == nil && BeamUpdate.requirement(team: "AB\" or true") == nil, "no team or an odd one: no install")
+        let req = try #require(BeamUpdate.requirement(team: "ABCDE12345"))
+        #expect(req.contains("notarized") && req.contains("\"org.nx18.beam\"") && req.contains("anchor apple generic"))
+        #expect(BeamUpdate.installTarget(URL(fileURLWithPath: "/private/var/folders/x/AppTranslocation/A/d/NX 18 Beam.app")) == nil, "translocated: link only")
+    }
     @Test func checkOnlyWhenOnAndDue() async throws {
         let suite = "org.nx18.beam.test.upd.\(UUID().uuidString.prefix(8).lowercased())"
         defer { ScratchPrefs.clean(suite) }
@@ -64,5 +76,21 @@ import Testing
     @Test func events() {
         #expect(SetupEvent.parse(#"{"ev":"fixable","id":"venv","question":"Make a virtualenv?"}"#)?.id == "venv")
         #expect(SetupEvent.parse("plain text") == nil)
+    }
+}
+
+// B5 polish: Home's sounds follow the Mac's interface-sounds switch, and the letter keys stand in for the hints' buttons
+@Suite struct HomeTouchTests {
+    @Test func soundsFollowTheSystemSwitch() {
+        #expect(!HomeSounds.enabled(beam: false, system: nil), "off in Beam: silent")
+        #expect(HomeSounds.enabled(beam: true, system: nil), "the system switch never touched: on")
+        #expect(HomeSounds.enabled(beam: true, system: NSNumber(value: 1)))
+        #expect(!HomeSounds.enabled(beam: true, system: NSNumber(value: 0)), "Play user interface sound effects off: silent")
+        #expect(HomeSounds.sound(.left) == "Tink" && HomeSounds.sound(.a) == "Pop" && HomeSounds.sound(.b) == "Bottle")
+    }
+    @Test func letterKeys() {
+        #expect(PadEdges.letter("a") == .a && PadEdges.letter("B") == .b && PadEdges.letter("x") == .x && PadEdges.letter("Y") == .y)
+        #expect(PadEdges.letter("-") == .minus && PadEdges.letter("−") == .minus)
+        #expect(PadEdges.letter("z") == nil && PadEdges.letter("") == nil)
     }
 }

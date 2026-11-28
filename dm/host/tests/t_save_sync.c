@@ -55,6 +55,7 @@
 //   (36) the save size records ExtendSaveData / ExtendDeviceSaveData write (upstream 60f0fe506): packed with the save and in its hash, unpacked whole; packed saves with a
 //        record no build writes are refused; an extension with no Commit is sent, the other device brings it in; an older cloud save without records takes them out,
 //        into the backup
+//   (37) a held start (DM_SAVE_SYNC_CHOICE=hold) sends nothing, at the mount, in play or after the host; save_sync_synced says when a folder's file was synced with
 #include "../hle_fs.c"
 #include <ctype.h>
 #include <sys/wait.h>
@@ -1078,6 +1079,31 @@ int main(void) {
         CHECK(kept_at(CB, "local", "save.size", "100663296 4194304\n") && kept_at(CB, "local", "save_device.size", "50331648 4194304\n"), "both are kept in its backup (\"local\")");
         CHECK(!ss_scan(CB, &m2) && !strcmp(m2.hash, mo.hash), "and the save in place is the cloud's, hash for hash");
         unsetenv("DM_SAVE"); unsetenv("DM_CONTROL_NACP");
+    }
+
+    printf("(37) a held start (DM_SAVE_SYNC_CHOICE=hold: the Mac launcher's first-sync check could not see iCloud catch up) brings nothing in and sends nothing\n");
+    {   char H[1200], HF[1200], HG[1200], hcf[1400], hcg[1400];
+        snprintf(H, sizeof H, "%s/held/save", root); snprintf(HF, sizeof HF, "%s/iCloud Drive/NX 18 held", root); snprintf(HG, sizeof HG, "%s/iCloud Drive/NX 18 other", root);
+        mkd(H); mkd(HF); mkd(HG);
+        snprintf(hcf, sizeof hcf, "%s/%s/save.dmsync", HF, id); snprintf(hcg, sizeof hcg, "%s/%s/save.dmsync", HG, id);
+        snprintf(p, sizeof p, "%s/game.dat", H); put(p, "mac-old");
+        CHECK(!save_sync_synced(H, DM_GAME_ID, HF), "before any sync: this device has not synced the game through the folder");
+        CHECK(run(H, HF, "game.dat", "mac-h1", "hold", NULL, READABLE) == 0, "a held start mounts, plays, commits and flushes");
+        CHECK(!exists(hcf), "and sends nothing: the folder has no file of the game (another device's not listed yet stays the one to compare)");
+        fflush(stdout); fflush(stderr);
+        pid_t hp = fork();
+        if (!hp) { setenv("DM_SAVE_SYNC", HF, 1); setenv("DM_SAVE_SYNC_CHOICE", "hold", 1); _exit(save_sync_after_exit(H, DM_GAME_ID) != 1); }
+        int hst = 0; waitpid(hp, &hst, 0);
+        CHECK(WIFEXITED(hst) && WEXITSTATUS(hst) == 0 && !exists(hcf), "the Mac launcher's send after the host sends nothing either");
+        CHECK(!save_sync_synced(H, DM_GAME_ID, HF), "a held start leaves no sync with the folder: the next start checks again");
+        hp = fork();
+        if (!hp) { setenv("DM_SAVE_SYNC", HF, 1); unsetenv("DM_SAVE_SYNC_CHOICE"); _exit(save_sync_after_exit(H, DM_GAME_ID) != 1); }
+        waitpid(hp, &hst, 0);
+        CHECK(WIFEXITED(hst) && WEXITSTATUS(hst) == 0 && cloud_has(hcf, root, "game.dat", "mac-h1"), "without the hold the same send would have put this device's save there");
+        CHECK(save_sync_synced(H, DM_GAME_ID, HF) && !save_sync_synced(H, DM_GAME_ID, HG), "then this device has synced the game through that folder, and not through another");
+        snprintf(p, sizeof p, "%s/%s", HF, id);
+        CHECK(save_sync_synced(H, DM_GAME_ID, p), "the game's own folder inside it names the same file");
+        CHECK(!save_sync_synced(H, DM_GAME_ID, "0") && !exists(hcg), "sync off: none");
     }
 
     printf("== save sync: %d checks, %d failed ==\n", checks, fails);

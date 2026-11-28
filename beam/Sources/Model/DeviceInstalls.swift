@@ -3,6 +3,26 @@
 // and offers Renew within 2 days of the 7-day expiry. Route B (another tool) gets the IPA: Show in Finder or AirDrop
 import AppKit
 import Foundation
+import UserNotifications
+
+/// Where the expiry reminders go: the Mac's notifications in Beam, a list in tests
+@MainActor protocol ExpiryScheduler: AnyObject {
+    func schedule(_ r: ExpiryReminders.Reminder)
+    func cancel(_ ids: [String])
+}
+
+/// The same notification centre as Beam's build notifications (Library.notify), with a date
+@MainActor final class SystemExpiryScheduler: ExpiryScheduler {
+    static func askToNotify() { UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in } }
+    func schedule(_ r: ExpiryReminders.Reminder) {
+        Self.askToNotify()
+        let c = UNMutableNotificationContent()
+        c.title = r.title; c.body = r.body; c.sound = .default
+        let when = Calendar.current.dateComponents([.year, .month, .day, .hour, .minute], from: r.fireDate)
+        UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: r.id, content: c, trigger: UNCalendarNotificationTrigger(dateMatching: when, repeats: false)))
+    }
+    func cancel(_ ids: [String]) { UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: ids) }
+}
 
 /// Who signs an install: Xcode with the player's Apple account, or Beam with the player's own certificate and profile
 enum Signer: Sendable {
@@ -176,6 +196,36 @@ extension Library {
     func renew(_ r: InstallRecord) {
         guard let d = devices.first(where: { $0.id == r.deviceID }) else { lastError = DeviceError.notConnected(r.deviceName).errorDescription; return }
         install(r.gameID, on: d)
+    }
+
+    /// Renew All (Home's X, the library's toolbar): refreshes the devices, renews each due install on a connected one, one after the other, then says how it went
+    func renewAll() {
+        guard !renewingAll else { return }
+        renewingAll = true
+        Task {
+            defer { renewingAll = false }
+            await refreshDevices()
+            let plan = RenewAll.plan(installs: installs, devices: devices)
+            var renewed = 0, failed = 0
+            for r in plan.renew {
+                let before = jobs[r.gameID]
+                renew(r)
+                guard let job = jobs[r.gameID], job !== before else { failed += 1; continue }   // not started: the reason is in Beam's alert
+                await job.task?.value
+                if job.state == .done { renewed += 1 } else { failed += 1 }
+            }
+            renewNote = RenewAll.summary(renewed: renewed, failed: failed, notConnected: plan.notConnected)
+        }
+    }
+    /// Any install within 2 days of its expiry, or past it (Renew All shows then)
+    func renewDue(now: Date = .now) -> Bool { installs.contains { !$0.removed && $0.renewDue(now: now) } }
+    func expiryBadge(_ game: UUID, now: Date = .now) -> ExpiryBadge? { ExpiryBadge.make(installs(of: game), now: now) }
+
+    /// The reminders follow the installs: one per install, replaced when it is renewed, withdrawn when it goes (Library.installs' didSet)
+    func syncReminders(from old: [InstallRecord]) {
+        let c = ExpiryReminders.changes(old: old, new: installs, title: { id in self.games.first { $0.id == id }?.title ?? "A game" })
+        if !c.cancel.isEmpty { reminders.cancel(c.cancel) }
+        for r in c.schedule { reminders.schedule(r) }
     }
 
     func launch(_ r: InstallRecord) {

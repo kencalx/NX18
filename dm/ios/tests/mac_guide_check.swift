@@ -1,4 +1,4 @@
-// The Mac app's guide window (dm/mac/Launcher.swift MacGuideWindow, LauncherGuideFiles.swift), run by test_mac_guide.py on a guide folder it writes: the page's script reads the
+// The Mac app's guide window (dm/mac/Launcher.swift MacGuideWindow, LauncherGuideFiles.swift) and its window-at-start rule (MacGateStart), run by test_mac_guide.py on a guide folder it writes: the page's script reads the
 // guide's other files with XMLHttpRequest and fetch, calls the Switch applet's window.nx, and is refused a file outside the guide and a file: URL; nx.endApplet closes the guide.
 // Then the placeholder guide (dm/ios/tests/fixtures/guide, made up as the console's guides are): its 1280x720 page zoomed to fit the window's content, the first-paint event it waits
 // for, its footer buttons in the title bar's Back, L and R, and its end URL (http://localhost/) closing the guide. The web view is loaded without a window, so nothing shows on the
@@ -11,9 +11,20 @@ import WebKit
         let args = CommandLine.arguments
         guard args.count == 3 else { print("usage: mac_guide_check <htdocs> <placeholder htdocs>"); exit(2) }
         _ = NSApplication.shared
-        let failed = MainActor.assumeIsolated { check(htdocs: URL(fileURLWithPath: args[1])) + placeholder(htdocs: URL(fileURLWithPath: args[2])) }
+        let failed = MainActor.assumeIsolated { check(htdocs: URL(fileURLWithPath: args[1])) + placeholder(htdocs: URL(fileURLWithPath: args[2])) } + gateStart()
         print("mac guide: \(failed) failed")
         exit(failed == 0 ? 0 : 1)
+    }
+
+    // The window at start (dm/mac/Launcher.swift MacGateStart): Gate at start, Option held, and the in-game menu's Exit and return to Gate, which shows it once whatever else says
+    static func gateStart() -> Int {
+        var failed = 0
+        func expect(_ ok: Bool, _ what: String) { if !ok { print("FAIL gate start: \(what)"); failed += 1 } }
+        expect(MacGateStart.windowShows(windowShow: nil, optionHeld: false, gateNext: false), "unset is on")
+        expect(!MacGateStart.windowShows(windowShow: false, optionHeld: false, gateNext: false), "Gate at start off skips it")
+        expect(MacGateStart.windowShows(windowShow: false, optionHeld: true, gateNext: false), "Option shows it")
+        expect(MacGateStart.windowShows(windowShow: false, optionHeld: false, gateNext: true), "Exit and return to Gate shows it")
+        return failed
     }
 
     @MainActor static func check(htdocs: URL) -> Int {

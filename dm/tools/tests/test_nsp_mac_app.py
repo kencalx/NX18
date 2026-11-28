@@ -123,8 +123,8 @@ class PackReuse(unittest.TestCase):
             'pso/prebuilt.tsv': b'prebuilt', 'pso/rest_pairs.tsv': b'rest', 'pso/standins.tsv': b'standins', 'pso/archive.tsv': b'index',
             'env.txt': b'DM_TEST=1', 'split.tsv': b'split', 'icon.jpg': b'jpeg', 'art.jpg': b'art', 'logo.png': b'\x89PNG logo', 'about.json': b'{}', 'manual.pdf': b'%PDF-1.7', 'source/launcher.c': b'launcher',
             'host/romfs_image.h': b'validator', 'host/save_sync.c': b'sync', 'host/save_sync.h': b'sync api', 'host/ui_font.h': b'ui font api', 'host/log_redirect.h': b'log', 'tools/romfs.py': b'reader',
-            'source/Launcher.swift': b'window', 'ios/Sources/LauncherSettings.swift': b'model', 'ios/Sources/LauncherRow.swift': b'rows', 'ios/Sources/LauncherGuideFiles.swift': b'guide',
-            'ios/Sources/SaveSyncReport.swift': b'report', 'ios/Sources/NXFont.swift': b'text styles', 'ios/Sources/LauncherPanel.swift': b'gate', 'ios/Sources/LauncherFocus.swift': b'gate', 'ios/Sources/NX18Look.swift': b'gate', 'ios/Sources/NX18Glass.swift': b'gate', 'ios/Sources/NXButtonGlyph.swift': b'gate', 'ios/Sources/NXButtonGlyphData.swift': b'gate', 'ios/Sources/NX18Card.swift': b'gate', 'ios/Sources/NX18Profile.swift': b'profile', 'uifont.ttf': b'\x00\x01\x00\x00 stand-in font',
+            'source/Launcher.swift': b'window', 'source/MacFirstSync.swift': b'first sync', 'ios/Sources/LauncherSettings.swift': b'model', 'ios/Sources/LauncherRow.swift': b'rows', 'ios/Sources/LauncherGuideFiles.swift': b'guide',
+            'ios/Sources/SaveSyncReport.swift': b'report', 'ios/Sources/NXFont.swift': b'text styles', 'ios/Sources/LauncherPanel.swift': b'gate', 'ios/Sources/LauncherFocus.swift': b'gate', 'ios/Sources/NX18Look.swift': b'gate', 'ios/Sources/NX18Glass.swift': b'gate', 'ios/Sources/NXButtonGlyph.swift': b'gate', 'ios/Sources/NXButtonGlyphData.swift': b'gate', 'ios/Sources/NX18Card.swift': b'gate', 'ios/Sources/NX18Profile.swift': b'profile', 'ios/Sources/GameDocuments.swift': b'documents', 'uifont.ttf': b'\x00\x01\x00\x00 stand-in font',
             'ios/Resources/ThirdPartyNotices.txt': b'notices',
         }
         for n in pack_app.TABLES: files['profile/' + n] = n.encode()
@@ -224,8 +224,8 @@ class PackReuse(unittest.TestCase):
         names = ['dmhost', 'patched/main.patched.bin', 'patched/main.fixups.tsv', 'patched/main.gates.tsv', 'patched/main.cuts.tsv',
                  'patched/main.obs.tsv', 'patched/nro.tsv', 'msl/k.metallib', 'msl/k.json', 'msl/inputs.tsv', 'font/nintendo_ext.ttf',
                  'pso/gpu.mtl4a', 'pso/prebuilt.tsv', 'pso/rest_pairs.tsv', 'pso/standins.tsv', 'pso/archive.tsv', 'env.txt', 'icon.jpg', 'art.jpg', 'logo.png', 'about.json', 'manual.pdf', 'source/launcher.c',
-                 'source/Launcher.swift', 'ios/Sources/LauncherSettings.swift', 'ios/Sources/LauncherRow.swift', 'ios/Sources/LauncherGuideFiles.swift', 'ios/Sources/SaveSyncReport.swift',
-                 'ios/Sources/NXFont.swift', 'ios/Sources/LauncherPanel.swift', 'ios/Sources/LauncherFocus.swift', 'ios/Sources/NX18Look.swift', 'ios/Sources/NX18Glass.swift', 'ios/Sources/NXButtonGlyph.swift', 'ios/Sources/NXButtonGlyphData.swift', 'ios/Sources/NX18Card.swift', 'ios/Sources/NX18Profile.swift',   # the settings window's sources, the Gate panel's with them
+                 'source/Launcher.swift', 'source/MacFirstSync.swift', 'ios/Sources/LauncherSettings.swift', 'ios/Sources/LauncherRow.swift', 'ios/Sources/LauncherGuideFiles.swift', 'ios/Sources/SaveSyncReport.swift',
+                 'ios/Sources/NXFont.swift', 'ios/Sources/LauncherPanel.swift', 'ios/Sources/LauncherFocus.swift', 'ios/Sources/NX18Look.swift', 'ios/Sources/NX18Glass.swift', 'ios/Sources/NXButtonGlyph.swift', 'ios/Sources/NXButtonGlyphData.swift', 'ios/Sources/NX18Card.swift', 'ios/Sources/NX18Profile.swift', 'ios/Sources/GameDocuments.swift',   # the settings window's sources, the Gate panel's with them
                  'host/save_sync.c', 'host/save_sync.h', 'host/ui_font.h',   # the cloud-save code the launcher links (its send after the host exits), the UI font's registration
                  'ios/Resources/ThirdPartyNotices.txt',   # the third-party notices every app carries
                  'host/log_redirect.h']   # the launcher's log onto 1 and 2
@@ -288,8 +288,8 @@ class PackReuse(unittest.TestCase):
         self.assertIn(c[c.index('-o') + 1], s)   # launcher.c's object, with its main
         sync = next(c for c in self.commands if Path(c[0]).name == 'clang' and '-o' in c and c[-1].endswith('save_sync.c'))
         self.assertIn(sync[sync.index('-o') + 1], s)   # save_sync.c's object: the launcher sends the save once the host has exited
-        self.assertEqual([Path(x).name for x in s if x.endswith('.swift')], ['Launcher.swift', 'LauncherSettings.swift', 'LauncherRow.swift', 'LauncherGuideFiles.swift', 'SaveSyncReport.swift',
-                                                                           'NXFont.swift', 'LauncherPanel.swift', 'LauncherFocus.swift', 'NX18Look.swift', 'NX18Glass.swift', 'NXButtonGlyph.swift', 'NXButtonGlyphData.swift', 'NX18Card.swift', 'NX18Profile.swift'])
+        self.assertEqual([Path(x).name for x in s if x.endswith('.swift')], ['Launcher.swift', 'MacFirstSync.swift', 'LauncherSettings.swift', 'LauncherRow.swift', 'LauncherGuideFiles.swift', 'SaveSyncReport.swift',
+                                                                           'NXFont.swift', 'LauncherPanel.swift', 'LauncherFocus.swift', 'NX18Look.swift', 'NX18Glass.swift', 'NXButtonGlyph.swift', 'NXButtonGlyphData.swift', 'NX18Card.swift', 'NX18Profile.swift', 'GameDocuments.swift'])
         self.assertIn('CoreText', [s[i + 1] for i, x in enumerate(s) if x == '-framework'])   # ui_font.h's registration
 
     def test_selected_file_modes_and_file_additions_and_removals_invalidate(self):
@@ -739,6 +739,71 @@ class App(unittest.TestCase):
         finally:
             subprocess.run(['defaults', 'delete', domain], capture_output=True)
             Path(os.path.expanduser(f'~/Library/Preferences/{domain}.plist')).unlink(missing_ok=True)
+
+    def test_cloud_saves_place(self):
+        """launcher.c dm_mac_cloud_place: DM_SAVE_SYNC from the launch environment > the NX 18 card's choice (nx18.cloud) > the NX 18 folder by default when one is connected and
+        there and the game has no own folder > its own folder (cloudSaves.folder) > off; the NX 18 folder only with the Profile switch on. The log names the place, never a path.
+        Then the layout: the Mac's save sent through the NX 18 folder is the file an iPhone's host reads through the same folder (<folder>/<title ID>/save.dmsync, cloud_path)"""
+        domain = f'org.nxnative.test.{uuid.uuid4().hex}'   # never a real game's domain; HOME is the test's own (never the real NX 18 folder)
+        home = self.tmp / 'home'; logs = home / 'Library/Logs/nxnative'; line = home / 'Library/Application Support/nxnative/nx18-folder'
+        nx, own, gone = self.tmp / 'iCloud/NX 18 Player', self.tmp / 'iCloud/Game Own', self.tmp / 'iCloud/Gone'
+        nx.mkdir(parents=True); own.mkdir(parents=True); line.parent.mkdir(parents=True, exist_ok=True)
+        a = types.SimpleNamespace(**vars(self.args)); a.out = str(self.tmp / 'Cloud.app'); a.icon = None; a.bundle_id = domain
+        with mock.patch.object(pack_app, 'sign', lambda *x: None), mock.patch('sys.stdout'): pack_app.pack(a)
+        app = self.tmp / 'Cloud.app'
+
+        def pref(key, value):
+            if value is None: subprocess.run(['defaults', 'delete', domain, key], capture_output=True)
+            else: subprocess.run(['defaults', 'write', domain, key, *(['-bool', value] if value in ('YES', 'NO') else ['-string', value])], check=True)
+
+        def run(own_folder=None, choice=None, connected=None, profile=None, **env):
+            pref('cloudSaves.folder', None if own_folder is None else str(own_folder)); pref('nx18.cloud', choice); pref('nx18.profile', profile)
+            if connected: line.write_text(f'{connected}\n')
+            else: line.unlink(missing_ok=True)
+            p = self.launch(app=app, **env); out = p.communicate(timeout=30)[0].decode()
+            self.assertEqual(p.returncode, 7, out)
+            text = (logs / f'{TID}.log').read_text()
+            ours = '\n'.join(ln for ln in text.splitlines() if ln.startswith('launcher:'))   # the launcher's lines (the host's save sync names its file: save_sync.c)
+            for folder in (nx, own, gone): self.assertNotIn(str(folder), ours, 'no path in the launcher lines (privacy)')
+            return self.host_run().get('DM_SAVE_SYNC'), text
+
+        try:
+            self.assertEqual(run()[0], None)   # nothing chosen, nothing connected: off
+            sync, log = run(own_folder=own)
+            self.assertEqual(sync, str(own)); self.assertIn("launcher: cloud saves through this game's own folder", log)
+            sync, log = run(connected=nx)   # an NX 18 folder connected (the card, Beam) and no own folder: the NX 18 folder, chosen or not
+            self.assertEqual(sync, str(nx)); self.assertIn('launcher: cloud saves through the NX 18 folder', log)
+            self.assertEqual(run(own_folder=own, connected=nx)[0], str(own))   # an own folder and no choice: it stays (existing players' saves do not move by themselves)
+            self.assertEqual(run(own_folder=own, connected=nx, choice='shared')[0], str(nx))   # the card's NX 18 folder
+            self.assertEqual(run(connected=nx, choice='own')[0], None)   # the card's Own folder, with none chosen: off
+            self.assertEqual(run(own_folder=own, connected=nx, choice='shared', profile='NO')[0], str(nx))   # the card's choice holds with the switch off (as on the iPhone): Off moves the save first
+            self.assertEqual(run(connected=nx, profile='NO')[0], None)   # the default needs the switch on
+            self.assertEqual(run(own_folder='', connected=nx)[0], None)   # turned off ("" stored): this Mac keeps its own save, the default never syncs it
+            self.assertEqual(run(own_folder='', connected=nx, choice='shared')[0], str(nx))
+            sync, log = run(own_folder=own, connected=gone, choice='shared')   # the connected folder is not there (iCloud Drive off): its own folder, and the log says why
+            self.assertEqual(sync, str(own)); self.assertIn('the NX 18 folder, which is not connected or cannot be reached now; they go through its own folder', log)
+            self.assertEqual(run(connected=gone)[0], None)
+            self.assertEqual(run(own_folder=own, connected=nx, choice='shared', DM_SAVE_SYNC=str(own))[0], str(own))   # the launch's DM_SAVE_SYNC wins over everything
+            # The layout: a save this Mac sends through the NX 18 folder lands at <NX 18>/<title ID>/save.dmsync, and the host reading that folder with the title as the iPhone
+            # names it (dm_save_title, any case) reads the same file
+            save = home / f'Library/Application Support/nxnative/{TID}/save'; (save / 'slot.bin').write_bytes(b'mac save')
+            run(connected=nx)
+            cloud = nx / TID / 'save.dmsync'
+            self.assertTrue(cloud.is_file(), sorted(str(x) for x in nx.rglob('*')))
+            phone = self.tmp / 'phone-save'; phone.mkdir()
+            (self.tmp / 'report.c').write_text('#include <stdio.h>\n#include "save_sync.h"\nint main(int c, char **v) { char out[1024]; '
+                                               'if (save_sync_report(v[1], v[2], v[3], 2000, out, sizeof out)) return 1; puts(out); return 0; }\n')
+            subprocess.run(['xcrun', 'clang', '-arch', 'arm64', '-I', REPO / 'dm/host', '-o', self.tmp / 'report', self.tmp / 'report.c', REPO / 'dm/host/save_sync.c'], check=True)
+            mac = subprocess.run([self.tmp / 'report', save, TID, nx], capture_output=True, text=True, check=True).stdout
+            phone_line = subprocess.run([self.tmp / 'report', phone, TID.lower(), nx], capture_output=True, text=True, check=True).stdout
+            chash = dict(kv.split('=', 1) for kv in mac.split())['chash']
+            self.assertNotEqual(chash, '-', mac)
+            self.assertIn('cloud=1', phone_line); self.assertEqual(dict(kv.split('=', 1) for kv in phone_line.split())['chash'], chash, phone_line)
+        finally:
+            subprocess.run(['defaults', 'delete', domain], capture_output=True)
+            Path(os.path.expanduser(f'~/Library/Preferences/{domain}.plist')).unlink(missing_ok=True)
+            line.unlink(missing_ok=True)
+            shutil.rmtree(home / f'Library/Application Support/nxnative/{TID}/save', ignore_errors=True)
 
     def test_signed(self):   # ad-hoc, both the host and the bundle, never the hardened runtime (it refuses the executable memory the host makes for the game's code)
         for target in (self.app, self.app / 'Contents/MacOS/dmhost'):

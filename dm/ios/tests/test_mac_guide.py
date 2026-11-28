@@ -43,8 +43,12 @@ class MacGuideTests(unittest.TestCase):
             # the window's cloud-save check calls the host's save_sync_report, which the app links as save_sync.o (dm/mac/pack_app.py)
             c = subprocess.run(['xcrun', '-sdk', 'macosx', 'clang', '-I', str(REPO / 'dm/host'), '-c', '-o', str(sync), str(REPO / 'dm/host/save_sync.c')], capture_output=True, text=True, timeout=300)
             self.assertEqual(c.returncode, 0, c.stdout + c.stderr)
-            sources = [REPO / 'dm/ios/Sources/LauncherSettings.swift', REPO / 'dm/ios/Sources/LauncherRow.swift', REPO / 'dm/ios/Sources/SaveSyncReport.swift', REPO / 'dm/mac/Launcher.swift',
-                       REPO / 'dm/ios/Sources/LauncherGuideFiles.swift', REPO / 'dm/ios/Sources/NXFont.swift', *[REPO / 'dm/ios/Sources' / n for n in ['LauncherPanel.swift', 'LauncherFocus.swift', 'NX18Look.swift', 'NX18Glass.swift', 'NXButtonGlyph.swift', 'NXButtonGlyphData.swift', 'NX18Card.swift', 'NX18Profile.swift']], Path(__file__).with_name('mac_guide_check.swift'), sync]
+            # and launcher.c's dm_mac_cloud_place (where the saves go), which has launcher.c's main beside it: a stand-in that says off
+            place = tmp / 'cloud_place.o'; (tmp / 'cloud_place.c').write_text('#include <stddef.h>\nint dm_mac_cloud_place(char *out, size_t n, int *missed) { if (n) out[0] = 0; if (missed) *missed = 0; return 0; }\n')
+            c = subprocess.run(['xcrun', '-sdk', 'macosx', 'clang', '-c', '-o', str(place), str(tmp / 'cloud_place.c')], capture_output=True, text=True, timeout=300)
+            self.assertEqual(c.returncode, 0, c.stdout + c.stderr)
+            sources = [REPO / 'dm/ios/Sources/LauncherSettings.swift', REPO / 'dm/ios/Sources/LauncherRow.swift', REPO / 'dm/ios/Sources/SaveSyncReport.swift', REPO / 'dm/mac/Launcher.swift', REPO / 'dm/mac/MacFirstSync.swift',
+                       REPO / 'dm/ios/Sources/LauncherGuideFiles.swift', REPO / 'dm/ios/Sources/NXFont.swift', *[REPO / 'dm/ios/Sources' / n for n in ['LauncherPanel.swift', 'LauncherFocus.swift', 'NX18Look.swift', 'NX18Glass.swift', 'NXButtonGlyph.swift', 'NXButtonGlyphData.swift', 'NX18Card.swift', 'NX18Profile.swift', 'GameDocuments.swift']], Path(__file__).with_name('mac_guide_check.swift'), sync, place]
             c = subprocess.run(['xcrun', '-sdk', 'macosx', 'swiftc', '-swift-version', '6', '-parse-as-library', '-module-cache-path', str(tmp / 'module-cache'),
                                 '-o', str(exe), *map(str, sources)], capture_output=True, text=True, timeout=300)
             self.assertEqual(c.returncode, 0, c.stdout + c.stderr)

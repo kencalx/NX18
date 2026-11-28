@@ -26505,7 +26505,7 @@ typedef struct { id<MTL4FXSpatialScaler> sc; id<MTLTexture> in, out; uint64_t ma
 static fx_state g_fx_present;   // only the present thread encodes or replaces the scaler
 static _Atomic int g_fx_mode = -1;   // 1 = metalfx, 0 = off (nvn_upscale_pick.h UP_*); the live present sets it (fx_mode), a capture reads it
 static _Atomic int g_fx_req = -1;    // the in-game menu's Upscaling (mtl_present_upscale_set, main thread) until the live present takes it at its next present; -1 none
-// The front ends' (front.h): the iPhone's copies under its in-game menu's lock; the Mac's menus change no variable while the game runs, and the unit tests have no front end
+// The front ends' (front.h): the iPhone's and the Mac's copy under their in-game menu's lock (front_ios.m, front_mac.m); this one is for the unit tests, which have no front end
 __attribute__((weak)) int front_env_copy(const char *name, char *out, size_t cap) {
     const char *e = getenv(name);
     if (cap) strlcpy(out, e ? e : "", cap);

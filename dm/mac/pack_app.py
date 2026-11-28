@@ -98,12 +98,13 @@ def min_os(host):   # the host's deployment target (LC_BUILD_VERSION minos): the
 
 
 def swift_sources():   # the settings window, with the iOS launcher's model and rows, its guide pages' web view configuration, the cloud-save report and the UI font's text styles
-    return [HERE / 'Launcher.swift', HERE.parent / 'ios/Sources/LauncherSettings.swift', HERE.parent / 'ios/Sources/LauncherRow.swift', HERE.parent / 'ios/Sources/LauncherGuideFiles.swift',
+    return [HERE / 'Launcher.swift', HERE / 'MacFirstSync.swift', HERE.parent / 'ios/Sources/LauncherSettings.swift', HERE.parent / 'ios/Sources/LauncherRow.swift', HERE.parent / 'ios/Sources/LauncherGuideFiles.swift',
             HERE.parent / 'ios/Sources/SaveSyncReport.swift', HERE.parent / 'ios/Sources/NXFont.swift',
             # the Gate panel and what it draws with (gate-ui §13): the panel and its focus model, the looks, glass, the button glyphs and the NX 18 card
             HERE.parent / 'ios/Sources/LauncherPanel.swift', HERE.parent / 'ios/Sources/LauncherFocus.swift', HERE.parent / 'ios/Sources/NX18Look.swift',
             HERE.parent / 'ios/Sources/NX18Glass.swift', HERE.parent / 'ios/Sources/NXButtonGlyph.swift', HERE.parent / 'ios/Sources/NXButtonGlyphData.swift',
-            HERE.parent / 'ios/Sources/NX18Card.swift', HERE.parent / 'ios/Sources/NX18Profile.swift']
+            HERE.parent / 'ios/Sources/NX18Card.swift', HERE.parent / 'ios/Sources/NX18Profile.swift',
+            HERE.parent / 'ios/Sources/GameDocuments.swift']   # the player's documents on the Manual pill
 
 
 def notices():   # the third-party notices (dm/tools/third_party_notices.py), which every app carries as Resources/dm/ThirdPartyNotices.txt: the window's Acknowledgements (Launcher.swift)

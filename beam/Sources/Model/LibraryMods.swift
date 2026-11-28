@@ -174,9 +174,33 @@ extension Library {
         save()
     }
 
-    /// My files: the player's own guides and maps for a game, in Beam's folder (never packed into an IPA, which can be shared)
+    /// My files: the player's own guides and maps for a game (never packed into an IPA, which can be shared): Beam's folder, or the NX 18 folder's <TITLE ID>/Documents with
+    /// Keep My files in the NX 18 folder on and a folder connected (MyFilesPlace.swift)
     func myFilesFolder(_ g: LibraryGame) -> URL? {
-        g.identity.map { folder.appending(path: "My Files/\($0.titleId.uppercased())", directoryHint: .isDirectory) }
+        g.identity.map { MyFilesPlace.current(library: folder, titleID: $0.titleId, keepInNX18: settings.myFilesInNX18, nx18: myFilesNX18) }
+    }
+    /// The NX 18 folder My files go to: the one this Mac's games use, when the switch is on
+    var myFilesNX18: URL? { settings.myFilesInNX18 ? ProfileSetup.connectedFolder().flatMap { MyFilesPlace.reachable($0) ? $0 : nil } : nil }   // a folder gone since: Beam's
+    /// Brings My files to where the switch says (MyFilesPlace.settle), off the main thread and one settle at a time: every game at the switch and at launch, one game when its page
+    /// opens (a folder connected since then). What moved shows under the switch (myFilesNote)
+    func settleMyFiles(titleIDs: [String]? = nil) async {
+        let before = myFilesSettle
+        let library = folder, on = settings.myFilesInNX18, nx18 = ProfileSetup.connectedFolder()
+        let run = Task { () -> MyFilesPlace.Report in
+            await before?.value
+            return await Task.detached(priority: .userInitiated) { MyFilesPlace.settle(library: library, keepInNX18: on, nx18: nx18, titleIDs: titleIDs) }.value
+        }
+        myFilesSettle = Task { _ = await run.value }
+        let r = await run.value
+        if r.moved > 0 { myFilesSettled += 1 }
+        guard titleIDs == nil || r != MyFilesPlace.Report() else { return }
+        let n = r.moved
+        var parts = [n == 0 ? nil : "\(n) file\(n == 1 ? "" : "s") moved \(on ? "to the NX 18 folder" : "back to Beam")."]
+        if r.waiting > 0 { parts.append("\(r.waiting) still downloading from iCloud: Beam moves \(r.waiting == 1 ? "it" : "them") when \(r.waiting == 1 ? "it arrives" : "they arrive").") }
+        if r.failed > 0 { parts.append("\(r.failed) could not be moved and stayed where \(r.failed == 1 ? "it was" : "they were").") }
+        if on && !(nx18.map(MyFilesPlace.reachable) ?? false) { parts.append("Connect an NX 18 folder above: until then My files stay in Beam.") }
+        let text = parts.compactMap { $0 }.joined(separator: " ")
+        myFilesNote = text.isEmpty ? nil : text
     }
     func myFiles(_ g: LibraryGame) -> [URL] {
         guard let f = myFilesFolder(g) else { return [] }
