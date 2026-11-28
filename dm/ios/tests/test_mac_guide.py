@@ -48,7 +48,7 @@ class MacGuideTests(unittest.TestCase):
             c = subprocess.run(['xcrun', '-sdk', 'macosx', 'clang', '-c', '-o', str(place), str(tmp / 'cloud_place.c')], capture_output=True, text=True, timeout=300)
             self.assertEqual(c.returncode, 0, c.stdout + c.stderr)
             sources = [REPO / 'dm/ios/Sources/LauncherSettings.swift', REPO / 'dm/ios/Sources/LauncherRow.swift', REPO / 'dm/ios/Sources/SaveSyncReport.swift', REPO / 'dm/mac/Launcher.swift', REPO / 'dm/mac/MacFirstSync.swift',
-                       REPO / 'dm/ios/Sources/LauncherGuideFiles.swift', REPO / 'dm/ios/Sources/NXFont.swift', *[REPO / 'dm/ios/Sources' / n for n in ['LauncherPanel.swift', 'LauncherFocus.swift', 'NX18Look.swift', 'NX18Glass.swift', 'NXButtonGlyph.swift', 'NXButtonGlyphData.swift', 'NX18Card.swift', 'NX18Profile.swift', 'GameDocuments.swift']], Path(__file__).with_name('mac_guide_check.swift'), sync, place]
+                       REPO / 'dm/ios/Sources/LauncherGuideFiles.swift', REPO / 'dm/ios/Sources/NXFont.swift', *[REPO / 'dm/ios/Sources' / n for n in ['LauncherPanel.swift', 'LauncherFocus.swift', 'NX18Look.swift', 'NX18Glass.swift', 'NXButtonGlyph.swift', 'NXButtonGlyphData.swift', 'NX18Card.swift', 'NX18Profile.swift', 'GameDocuments.swift', 'ArtFocus.swift']], Path(__file__).with_name('mac_guide_check.swift'), sync, place]
             c = subprocess.run(['xcrun', '-sdk', 'macosx', 'swiftc', '-swift-version', '6', '-parse-as-library', '-module-cache-path', str(tmp / 'module-cache'),
                                 '-o', str(exe), *map(str, sources)], capture_output=True, text=True, timeout=300)
             self.assertEqual(c.returncode, 0, c.stdout + c.stderr)

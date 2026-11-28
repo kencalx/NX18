@@ -183,6 +183,16 @@ class Main(Base):
         for name, value, pattern in (('ART', 'missing.jpg', 'no such art file'), ('LOGO', 'missing.png', 'no such logo file'), ('MANUAL', 'missing.pdf', 'no such manual file')):
             with mock.patch.object(nsp, name, str(self.dump / value)), self.assertRaisesRegex(nsp.BuildError, pattern): self.run_main()
 
+    def test_art_focus_is_checked_and_normalized(self):   # --art-focus / ART_FOCUS: x,y or x,y,zoom in range, as x,y,zoom; anything else stops at once
+        self.assertEqual(nsp.art_focus('0.25,0.5'), '0.25,0.5,1'); self.assertEqual(nsp.art_focus(' 0.12345 ,1,2.5'), '0.123,1,2.5'); self.assertIsNone(nsp.art_focus('')); self.assertIsNone(nsp.art_focus(None))
+        self.assertEqual(nsp.art_focus('-0,0.5'), '0,0.5,1')   # digits only for build_ipa.sh
+        for bad in ('0.5', 'left,top', '1.5,0.5', '0.5,-0.1', '0.5,0.5,0.5', '0.5,0.5,4', 'nan,0.5', '0.5,0.5,1,1'):
+            with self.subTest(bad=bad), self.assertRaisesRegex(nsp.BuildError, r'the art framing \(--art-focus / ART_FOCUS\)'): nsp.art_focus(bad)
+        self.assertEqual(nsp.parse_args([str(self.dump), '--art-focus', '0.3,0.4']).art_focus, '0.3,0.4'); self.assertEqual(nsp.ART_FOCUS, '')
+        with mock.patch.object(nsp, 'find_repo', return_value=REPO), mock.patch.object(nsp, 'WORK_DIR', ''), \
+             mock.patch.object(nsp, 'check_prereqs', side_effect=AssertionError('went on')), self.assertRaisesRegex(nsp.BuildError, 'the art framing'):
+            nsp.main(nsp.parse_args([str(self.dump), '--art-focus', 'middle']))
+
     def test_ui_font_is_checked_before_the_build(self):   # --ui-font / UI_FONT: a missing file, another kind of file or a picture named .ttf stops at once, not after the extraction
         def stops(*opts, pattern):
             with mock.patch.object(nsp, 'find_repo', return_value=REPO), mock.patch.object(nsp, 'WORK_DIR', ''), \

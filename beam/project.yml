@@ -42,6 +42,7 @@ targets:
       - path: ../dm/ios/Sources/NX18Card.swift
       - path: ../dm/ios/Sources/NX18Profile.swift
       - path: ../dm/ios/Sources/GameDocuments.swift   # the game apps' documents: Beam keeps My files in the NX 18 folder under its names (MyFilesPlace.swift)
+      - path: ../dm/ios/Sources/ArtFocus.swift        # the key art's framing: Adjust Framing on the game page, Beam Home's backdrop, and what Beam gives the games it builds
     dependencies:
       - sdk: SwiftUI.framework
       - sdk: AppKit.framework

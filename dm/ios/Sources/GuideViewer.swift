@@ -510,7 +510,7 @@ struct LauncherAboutSheet: View {
         ZStack(alignment: .bottomLeading) {
             NX18Palette.background(tint: artwork.tint).frame(height: 200)   // the dark base: a light sheet never shows through the art (§11a.2)
             Color.clear.frame(height: 200).overlay {
-                if let art = artwork.art { Image(uiImage: art).resizable().scaledToFill() }
+                if let art = artwork.art { FramedArt(image: Image(uiImage: art), natural: art.size, focus: artwork.focus) }   // framed as the Gate shows it (ArtFocus.swift)
                 else if let icon = artwork.icon { Image(uiImage: icon).resizable().scaledToFill().blur(radius: 40).opacity(0.6) }
             }
             .clipped()

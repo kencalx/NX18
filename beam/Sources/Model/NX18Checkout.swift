@@ -8,6 +8,12 @@ struct NX18Checkout: Sendable, Equatable {
 
     static let defaultFolder = URL.homeDirectory.appending(path: "NX18")
 
+    /// Whether this checkout's script takes a newer option (an older NX 18 stops at one it does not know): read from the script's text, as the option is declared there
+    func knows(_ option: String) -> Bool {
+        guard let text = try? String(contentsOf: script, encoding: .utf8) else { return false }
+        return text.contains("'\(option)'")
+    }
+
     /// The Python to run the script with: the checkout's .venv (scripts/release/nx18-setup.sh makes it), else the first arm64 Python 3.12+ in nx18-setup.sh's order that has
     /// the build's modules, else the first of them that exists (identify needs none of the modules). Never macOS's own /usr/bin/python3, which is too old
     func python(checkModules: Bool = true) -> URL? {
@@ -44,6 +50,7 @@ struct BuildRequest: Sendable, Equatable {
     var mods: URL?               // --mods: Beam's mods folder for the game (never the player's own mods folder beside the game files)
     var manual: URL?             // --manual: the game's manual (PDF)
     var art: URL?, logo: URL?, icon: URL?   // --art, --logo, --icon: the player's picks
+    var artFocus: ArtFocus?      // --art-focus: the player's framing of the key art (the app starts with it; a framing made in the app comes first)
     var appName: String?         // --app-name: the player's name for the game (Rename)
     var profileSeed: URL?        // --profile-seed: the player's Profile (ProfileSetup.seed) in the IPA for other tools (Route B); the Xcode route takes it at xcodebuild, a Mac app reads the Mac's own
     var xcode: XcodePrep?        // --prepare-xcode: an Xcode project to sign with the player's account (iPhone install, beam-design §3.4 Route A)
@@ -71,6 +78,7 @@ struct BuildRequest: Sendable, Equatable {
         if let art { a += ["--art", art.path] }
         if let logo { a += ["--logo", logo.path] }
         if let icon { a += ["--icon", icon.path] }
+        if let artFocus { a += ["--art-focus", artFocus.text] }
         if let appName { a += ["--app-name", appName] }
         if let output { a += ["-o", output.path] }
         if let profileSeed, target == .iPhone, xcode == nil { a += ["--profile-seed", profileSeed.path] }

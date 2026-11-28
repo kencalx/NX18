@@ -31,8 +31,9 @@ class Committed(unittest.TestCase):
         rows = [ln for ln in self.lines if not ln.startswith('#')]   # as the host splits them: a '\r' would stay in the row
         keep, bad = pso_seed.collect(rows, self.shmap)
         self.assertEqual((bad, len(keep)), ([], len(rows)))
-        self.assertEqual(pso_seed.counts(keep), {'S': 13051, 'R': 4752, 'C': 14, 'M': 0, 'rows': 17817})
-        self.assertEqual(len({pso_seed.identity(r) for r in rows}), 17817)
+        self.assertEqual(pso_seed.counts(keep), {'S': 13622, 'R': 5291, 'C': 17, 'M': 0, 'rows': 18930})
+        self.assertEqual(len({pso_seed.identity(r) for r in rows}), 18930)
+        self.assertEqual(pso_seed.counts(keep[:17817]), {'S': 13051, 'R': 4752, 'C': 14, 'M': 0, 'rows': 17817})   # the rows before 2026-11-24's
         self.assertEqual(pso_seed.counts(keep[:17282]), {'S': 12804, 'R': 4465, 'C': 13, 'M': 0, 'rows': 17282})   # the rows before 2026-11-17's
         self.assertEqual(pso_seed.counts(keep[:16266]), {'S': 12328, 'R': 3925, 'C': 13, 'M': 0, 'rows': 16266})
         self.assertEqual({len(r.split('\t')[1]) for r in rows if r.startswith('R\t')}, {1024})
@@ -53,10 +54,12 @@ class Committed(unittest.TestCase):
         self.assertEqual(self.found(r'(\d+) rows \((\d+) S, (\d+) R, (\d+) C\)', grown2), ('1016', '476', '540', '0'))
         grown3 = next(ln for ln in head if ln.startswith('# Grown on 2026-11-17'))   # the chain ae1dd68dc11c runs
         self.assertEqual(self.found(r'(\d+) rows \((\d+) S, (\d+) R, (\d+) C\)', grown3), ('535', '247', '287', '1'))
+        grown4 = next(ln for ln in head if ln.startswith('# Grown on 2026-11-24'))   # the Ultrawide run
+        self.assertEqual(self.found(r'(\d+) rows \((\d+) S, (\d+) R, (\d+) C\)', grown4), ('1113', '571', '539', '3'))
 
     def test_compute_rows_are_map_compute_shaders(self):
         c = [ln.split('\t')[1] for ln in self.lines if ln.startswith('C\t')]
-        self.assertEqual(len(c), 14)
+        self.assertEqual(len(c), 17)
         self.assertTrue(all(self.shmap.get(k[:-2]) == 'compute' for k in c))
 
 

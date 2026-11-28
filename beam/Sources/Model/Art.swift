@@ -115,3 +115,18 @@ enum SteamGrid {
         return b.count >= 12 && b[0...3] == [0x52, 0x49, 0x46, 0x46] && b[8...11] == [0x57, 0x45, 0x42, 0x50]
     }
 }
+
+/// The key art's framing in a built Mac app's own preferences (launcher.artFocus, ArtFocus.swift), which its window reads at its start, as Beam writes the game's settings there
+/// (GameSettingsView.swift): the player's framing from Beam's Adjust Framing over whatever the window kept
+enum MacArtFocus {
+    static func write(_ f: ArtFocus, app: URL) {
+        guard let d = defaults(app) else { return }
+        ArtFocus.store(f, in: d)
+    }
+    static func forget(app: URL) { defaults(app).map { ArtFocus.store(nil, in: $0) } }
+    static func read(app: URL) -> ArtFocus? { defaults(app).flatMap(ArtFocus.saved).flatMap(ArtFocus.init(text:)) }
+    private static func defaults(_ app: URL) -> UserDefaults? {
+        guard let id = Bundle(url: app)?.bundleIdentifier, id != Bundle.main.bundleIdentifier else { return nil }
+        return UserDefaults(suiteName: id)
+    }
+}

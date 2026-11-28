@@ -124,7 +124,7 @@ class PackReuse(unittest.TestCase):
             'env.txt': b'DM_TEST=1', 'split.tsv': b'split', 'icon.jpg': b'jpeg', 'art.jpg': b'art', 'logo.png': b'\x89PNG logo', 'about.json': b'{}', 'manual.pdf': b'%PDF-1.7', 'source/launcher.c': b'launcher',
             'host/romfs_image.h': b'validator', 'host/save_sync.c': b'sync', 'host/save_sync.h': b'sync api', 'host/ui_font.h': b'ui font api', 'host/log_redirect.h': b'log', 'tools/romfs.py': b'reader',
             'source/Launcher.swift': b'window', 'source/MacFirstSync.swift': b'first sync', 'ios/Sources/LauncherSettings.swift': b'model', 'ios/Sources/LauncherRow.swift': b'rows', 'ios/Sources/LauncherGuideFiles.swift': b'guide',
-            'ios/Sources/SaveSyncReport.swift': b'report', 'ios/Sources/NXFont.swift': b'text styles', 'ios/Sources/LauncherPanel.swift': b'gate', 'ios/Sources/LauncherFocus.swift': b'gate', 'ios/Sources/NX18Look.swift': b'gate', 'ios/Sources/NX18Glass.swift': b'gate', 'ios/Sources/NXButtonGlyph.swift': b'gate', 'ios/Sources/NXButtonGlyphData.swift': b'gate', 'ios/Sources/NX18Card.swift': b'gate', 'ios/Sources/NX18Profile.swift': b'profile', 'ios/Sources/GameDocuments.swift': b'documents', 'uifont.ttf': b'\x00\x01\x00\x00 stand-in font',
+            'ios/Sources/SaveSyncReport.swift': b'report', 'ios/Sources/NXFont.swift': b'text styles', 'ios/Sources/LauncherPanel.swift': b'gate', 'ios/Sources/LauncherFocus.swift': b'gate', 'ios/Sources/NX18Look.swift': b'gate', 'ios/Sources/NX18Glass.swift': b'gate', 'ios/Sources/NXButtonGlyph.swift': b'gate', 'ios/Sources/NXButtonGlyphData.swift': b'gate', 'ios/Sources/NX18Card.swift': b'gate', 'ios/Sources/NX18Profile.swift': b'profile', 'ios/Sources/GameDocuments.swift': b'documents', 'ios/Sources/ArtFocus.swift': b'art framing', 'uifont.ttf': b'\x00\x01\x00\x00 stand-in font',
             'ios/Resources/ThirdPartyNotices.txt': b'notices',
         }
         for n in pack_app.TABLES: files['profile/' + n] = n.encode()
@@ -225,7 +225,7 @@ class PackReuse(unittest.TestCase):
                  'patched/main.obs.tsv', 'patched/nro.tsv', 'msl/k.metallib', 'msl/k.json', 'msl/inputs.tsv', 'font/nintendo_ext.ttf',
                  'pso/gpu.mtl4a', 'pso/prebuilt.tsv', 'pso/rest_pairs.tsv', 'pso/standins.tsv', 'pso/archive.tsv', 'env.txt', 'icon.jpg', 'art.jpg', 'logo.png', 'about.json', 'manual.pdf', 'source/launcher.c',
                  'source/Launcher.swift', 'source/MacFirstSync.swift', 'ios/Sources/LauncherSettings.swift', 'ios/Sources/LauncherRow.swift', 'ios/Sources/LauncherGuideFiles.swift', 'ios/Sources/SaveSyncReport.swift',
-                 'ios/Sources/NXFont.swift', 'ios/Sources/LauncherPanel.swift', 'ios/Sources/LauncherFocus.swift', 'ios/Sources/NX18Look.swift', 'ios/Sources/NX18Glass.swift', 'ios/Sources/NXButtonGlyph.swift', 'ios/Sources/NXButtonGlyphData.swift', 'ios/Sources/NX18Card.swift', 'ios/Sources/NX18Profile.swift', 'ios/Sources/GameDocuments.swift',   # the settings window's sources, the Gate panel's with them
+                 'ios/Sources/NXFont.swift', 'ios/Sources/LauncherPanel.swift', 'ios/Sources/LauncherFocus.swift', 'ios/Sources/NX18Look.swift', 'ios/Sources/NX18Glass.swift', 'ios/Sources/NXButtonGlyph.swift', 'ios/Sources/NXButtonGlyphData.swift', 'ios/Sources/NX18Card.swift', 'ios/Sources/NX18Profile.swift', 'ios/Sources/GameDocuments.swift', 'ios/Sources/ArtFocus.swift',   # the settings window's sources, the Gate panel's with them
                  'host/save_sync.c', 'host/save_sync.h', 'host/ui_font.h',   # the cloud-save code the launcher links (its send after the host exits), the UI font's registration
                  'ios/Resources/ThirdPartyNotices.txt',   # the third-party notices every app carries
                  'host/log_redirect.h']   # the launcher's log onto 1 and 2
@@ -259,7 +259,7 @@ class PackReuse(unittest.TestCase):
     def test_all_metadata_sign_identity_and_selected_paths_invalidate(self):
         self.pack()
         for name, value in [('name', 'New Game'), ('version', '2.0'), ('bundle_id', 'org.test.new'), ('category', 'public.app-category.action-games'),
-                            ('lang', 'ja'), ('title_id', '0100000000000000'), ('marker', 'empty'), ('msl_name', 'custom'), ('sign', 'Fixture identity')]:
+                            ('lang', 'ja'), ('title_id', '0100000000000000'), ('marker', 'empty'), ('msl_name', 'custom'), ('sign', 'Fixture identity'), ('art_focus', '0.3,0.5,1')]:
             with self.subTest(option=name): setattr(self.args, name, value); self.assert_repacked()
         for name in ('host', 'patched', 'romfs', 'msl', 'tables', 'font', 'aoc', 'pso', 'env_file', 'icon', 'art', 'logo', 'about', 'manual', 'pso_pairs'):
             with self.subTest(path=name):
@@ -289,7 +289,7 @@ class PackReuse(unittest.TestCase):
         sync = next(c for c in self.commands if Path(c[0]).name == 'clang' and '-o' in c and c[-1].endswith('save_sync.c'))
         self.assertIn(sync[sync.index('-o') + 1], s)   # save_sync.c's object: the launcher sends the save once the host has exited
         self.assertEqual([Path(x).name for x in s if x.endswith('.swift')], ['Launcher.swift', 'MacFirstSync.swift', 'LauncherSettings.swift', 'LauncherRow.swift', 'LauncherGuideFiles.swift', 'SaveSyncReport.swift',
-                                                                           'NXFont.swift', 'LauncherPanel.swift', 'LauncherFocus.swift', 'NX18Look.swift', 'NX18Glass.swift', 'NXButtonGlyph.swift', 'NXButtonGlyphData.swift', 'NX18Card.swift', 'NX18Profile.swift', 'GameDocuments.swift'])
+                                                                           'NXFont.swift', 'LauncherPanel.swift', 'LauncherFocus.swift', 'NX18Look.swift', 'NX18Glass.swift', 'NXButtonGlyph.swift', 'NXButtonGlyphData.swift', 'NX18Card.swift', 'NX18Profile.swift', 'GameDocuments.swift', 'ArtFocus.swift'])
         self.assertIn('CoreText', [s[i + 1] for i, x in enumerate(s) if x == '-framework'])   # ui_font.h's registration
 
     def test_selected_file_modes_and_file_additions_and_removals_invalidate(self):
@@ -429,6 +429,14 @@ class PackReuse(unittest.TestCase):
         self.assert_repacked()
         self.assertEqual([n for n in ('art.jpg', 'logo.png', 'about.json', 'manual.pdf') if (dm / n).exists()], [])
         self.assertEqual((dm / 'ThirdPartyNotices.txt').read_bytes(), b'notices')   # every app, art or none: the window's Acknowledgements (dm/tools/third_party_notices.py)
+
+    def test_art_focus_lands_beside_the_art(self):   # --art-focus (the NSP script's, x,y,zoom): Resources/dm/art_focus.json, only with art; the window's own framing replaces it
+        self.pack()
+        dm = Path(self.args.out) / 'Contents/Resources/dm'
+        self.assertFalse((dm / 'art_focus.json').exists())
+        self.args.art_focus = '0.25,0.6,1.5'; self.assert_repacked()   # in the reuse key
+        self.assertEqual(json.loads((dm / 'art_focus.json').read_text()), {'x': 0.25, 'y': 0.6, 'zoom': 1.5})
+        self.args.art = None; self.assert_repacked(); self.assertFalse((dm / 'art_focus.json').exists())   # no art, no framing
 
     def test_ui_font_lands_in_resources_dm_uifont(self):   # --ui-font: Resources/dm/uifont/ui.<ext> (never dm/font, the game's shared fonts) and its name in Info.plist; without it neither
         self.pack()
@@ -1047,7 +1055,7 @@ class Script(unittest.TestCase):
              mock.patch.object(nsp, 'mac_gpu_arch', lambda *a: 'applegpu_g14s'), mock.patch.object(nsp, 'say', self.said.append):
             nsp.mac_app(sys.executable, REPO, out, 0x01008CF01BAAC000, tmp, tmp / 'ex', tmp / 'patched', tmp / 'dmhost', tmp / 'font', tmp / 'shader/cache' if gfx == 'nvn' else tmp / 'shader',
                         kw.get('aoc'), gfx, 'en-US', g, 'Game', '1.0.0', 'org.nxnative.01008cf01baac000', None, kw.get('sign', ''), {}, tmp, gpus=kw.get('gpus', ''),
-                        gpu_option=kw.get('gpu_option', True), **{k: kw[k] for k in ('art', 'about', 'manual', 'logo', 'ui_font') if k in kw})
+                        gpu_option=kw.get('gpu_option', True), **{k: kw[k] for k in ('art', 'about', 'manual', 'logo', 'ui_font', 'art_focus') if k in kw})
         self.pso_cmd = next((c for c in ran if c[1].endswith('pso_offline.py')), None)   # before the packer
         self.settings_cmd = next(c for c in ran if c[1].endswith('dm/games/settings.py'))
         c = ran[-1]; return {c[i]: c[i + 1] for i in range(3, len(c) - 1) if c[i].startswith('--')}, tmp
@@ -1076,6 +1084,11 @@ class Script(unittest.TestCase):
         self.assertEqual((o['--art'], o['--logo'], o['--about'], o['--manual']), (str(art), str(logo), str(about), str(manual)))
         o, _ = self.pack_cmd('nvn', art=art)
         self.assertEqual(o['--art'], str(art)); self.assertNotIn('--logo', o); self.assertNotIn('--about', o); self.assertNotIn('--manual', o)
+
+    def test_art_focus_option(self):   # --art-focus goes to the packer with the art, never without it
+        o, _ = self.pack_cmd('nvn', art=Path('/b/art/art.jpg'), art_focus='0.25,0.5,1')
+        self.assertEqual(o['--art-focus'], '0.25,0.5,1')
+        o, _ = self.pack_cmd('nvn', art_focus='0.25,0.5,1'); self.assertNotIn('--art-focus', o)
 
     def test_ui_font_options(self):   # --ui-font / UI_FONT (ui_font_info's path and PostScript name) go to the packer; without one, no option
         o, _ = self.pack_cmd('nvn', ui_font=(Path('/f/My UI.ttf'), 'MyUI-Regular', 'My UI'))

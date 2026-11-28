@@ -489,3 +489,41 @@ struct LauncherStatusLine: View {
         }
     }
 }
+
+// The framing mode's bar over the art: what to do, and Reset, Cancel and Done (with a controller: X, B and A, named as the pad labels them; with a keyboard: Return and Escape)
+struct ArtFramingBar: View {
+    var hint: String              // "Drag to move the art. Pinch to zoom." (the platform's words)
+    var glyphs: NXPadGlyphs? = nil
+    let reset: () -> Void
+    let cancel: () -> Void
+    let done: () -> Void
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Adjust art").nxFont(.headline, weight: .bold).foregroundStyle(.white).accessibilityAddTraits(.isHeader)
+            Text(hint).nxFont(.caption).foregroundStyle(NX18Palette.onArt).fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 10) {
+                button("Reset", glyph: glyphs?.glyph(.x), action: reset)
+                Spacer(minLength: 0)
+                button("Cancel", glyph: glyphs?.glyph(.b), action: cancel).keyboardShortcut(.cancelAction)
+                button("Done", glyph: glyphs?.glyph(.a), prominent: true, action: done).keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(14)
+        .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Color.black.opacity(0.62)))
+        .environment(\.colorScheme, .dark)
+        .accessibilityElement(children: .contain)
+    }
+    private func button(_ title: String, glyph: NXPadGlyph?, prominent: Bool = false, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                if let glyph { NXPadGlyphView(glyph, size: 15, relativeTo: .footnote) }
+                Text(title).nxFont(.subheadline, weight: .semibold)
+            }
+            .foregroundStyle(prominent ? NX18Palette.charcoal : .white)
+            .padding(.horizontal, 14).frame(minHeight: 44)
+            .background(Capsule().fill(prominent ? NX18Palette.coral : Color.white.opacity(0.16)))
+            .contentShape(Capsule())
+        }
+        .buttonStyle(NX18PressStyle())
+    }
+}

@@ -120,7 +120,7 @@ struct NX18AcknowledgeView: View {
         ZStack {
             NX18Palette.background(tint: artwork.tint)
             Color.clear.overlay {
-                if let art = artwork.art { Image(uiImage: art).resizable().scaledToFill() }
+                if let art = artwork.art { FramedArt(image: Image(uiImage: art), natural: art.size, focus: artwork.focus) }   // framed as the Gate shows it (ArtFocus.swift)
                 else if let icon = artwork.icon { Image(uiImage: icon).resizable().scaledToFill().blur(radius: 60, opaque: true).opacity(0.55).scaleEffect(1.15) }
             }
             .clipped()

@@ -285,6 +285,8 @@ struct LauncherExtras {
         enum CodingKeys: String, CodingKey { case name, intro, description, publisher, releaseDate, source }
     }
     var art: NSImage?
+    var focus = ArtFocus.centre   // the part of the art the banner shows (ArtFocus.swift): the player's own framing (launcher.artFocus, which NX 18 Beam may write), else dm/art_focus.json, else the middle
+    var packedFocus: ArtFocus?    // dm/art_focus.json (pack_app.py --art-focus)
     var logo: NSImage?       // dm/logo.png, the game's title wordmark with transparency (scripts/game_art.py), shown in place of the name; nil without it or when it cannot be decoded
     var logoDark = false     // a black wordmark, drawn with a light glow (NX18Logo.isDark)
     var backdrop: NSImage?   // without art: the app icon blurred on the CPU, the banner's backdrop
@@ -300,6 +302,8 @@ struct LauncherExtras {
         let fm = FileManager.default
         let dm = res.appendingPathComponent("dm")
         if let img = NSImage(contentsOf: dm.appendingPathComponent("art.jpg")), img.isValid, img.size.width > 0 { x.art = img }
+        x.packedFocus = ArtFocus.packed(at: dm.appendingPathComponent(ArtFocus.file))
+        x.focus = ArtFocus.resolve(saved: ArtFocus.saved(), packed: x.packedFocus)
         let logo = dm.appendingPathComponent("logo.png")
         if fm.fileExists(atPath: logo.path) {   // decoded and trimmed on the CPU as on iOS (NX18Logo.decode); one that cannot be decoded or shows nothing leaves the name
             if let cg = NX18Logo.decode(logo) { x.logo = NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height)); x.logoDark = NX18Logo.isDark(cg) }
@@ -422,10 +426,14 @@ struct LauncherView: View {
     @State private var focus: LauncherFocus?          // the keyboard's focus on the panel: nil until an arrow key moves it, again nil after a click
     @State private var cardOpen = false               // the NX 18 card (NX18Card.swift): the mark opens it
     @State private var look = NX18Appearance.current  // the Appearance choice (the card's row; gate-ui §11a.9)
+    @State private var artFocus = ArtFocus.centre     // the banner's framing of the key art (ArtFocus.swift): extras.focus as the window opens, the player's after Done
+    @State private var framing: ArtFocus?             // Adjust Art (the card's row, or the banner's right-click menu): the framing being made, drawn live; nil when not framing
+    @State private var bannerSize: CGSize = .zero     // for the arrow keys' steps while framing
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     init(m: LauncherModel, done: @escaping (Bool) -> Void, fit: @escaping (CGFloat) -> Void, extras: LauncherExtras = .load()) {
         self.m = m; self.done = done; self.fit = fit; self.extras = extras
+        _artFocus = State(initialValue: extras.focus)
     }
 
     private var name: String { info("CFBundleName") ?? "Game" }
@@ -447,6 +455,8 @@ struct LauncherView: View {
                       savesInNX18Folder: cloudPlace.inNX18, gateAtStartLocked: false, footer: AnyView(panelFooter), acknowledgements: MacNoticesWindow.url != nil,
                       touched: { _ in focus = nil; NX18RailsIdle.pulse() }, act: act)
                 .frame(maxHeight: .infinity)
+                .accessibilityHidden(framing != nil)
+                .overlay { if framing != nil { Color.black.opacity(0.5).contentShape(Rectangle()).onTapGesture {}.accessibilityHidden(true) } }   // Adjust Art: the settings wait, dimmed
             HStack {
                 if checking, let first = firstSync {   // a first sync through this folder: iCloud first (Play Anyway holds this start's sync)
                     ProgressView().controlSize(.small)
@@ -477,7 +487,7 @@ struct LauncherView: View {
         .onChange(of: m.skipAtStart) { _, skip in show = !skip }
         .onReceive(NotificationCenter.default.publisher(for: NX18Appearance.changed)) { _ in look = NX18Appearance.current; NSApp.keyWindow?.appearance = look.appearance }
         .sheet(isPresented: $aboutShown) {
-            if let a = extras.about { AboutGameSheet(about: a, name: name, art: extras.art, tint: extras.tint) }
+            if let a = extras.about { AboutGameSheet(about: a, name: name, art: extras.art, focus: artFocus, tint: extras.tint) }
         }
         .task {   // the player's documents, listed once as the window appears (the NX 18 folder's read is coordinated, off the main thread)
             mine = await GameDocuments.load(manual: nil, guide: nil, guideRoot: nil, companion: nil, nx18: GameDocuments.macNX18Folder(), titleID: info("DMTitleID"))
@@ -524,7 +534,8 @@ struct LauncherView: View {
         ZStack(alignment: .topTrailing) {
             Rectangle().fill(.ultraThinMaterial).overlay(Color.black.opacity(0.18)).ignoresSafeArea()
                 .contentShape(Rectangle()).onTapGesture { cardOpen = false }
-            NX18Card(gameVersion: info("CFBundleShortVersionString"), focused: nil, glyphs: nil, close: { cardOpen = false }, art: extras.art != nil, profileRows: MacProfileFlow.rows)
+            NX18Card(gameVersion: info("CFBundleShortVersionString"), focused: nil, glyphs: nil, close: { cardOpen = false }, art: extras.art != nil, profileRows: MacProfileFlow.rows,
+                     adjustArt: extras.art != nil ? { cardOpen = false; beginFraming() } : nil)
                 .frame(width: 340).padding(.top, 44).padding(.trailing, 16)
                 .onExitCommand { cardOpen = false }
         }
@@ -533,6 +544,16 @@ struct LauncherView: View {
     // The keyboard on the panel (gate-ui §13): arrows move the focus ring over the panel's lines, left / right step a focused choice where the line has one item, Return or
     // Space presses, Escape or Delete goes back a page. The first arrow only shows the ring
     private func key(_ k: KeyEquivalent) -> Bool {
+        if let f = framing, let art = extras.art {   // Adjust Art: the arrows move the window over the art, Return keeps it (Done), Escape leaves it (Cancel)
+            switch k {
+            case .upArrow, .downArrow, .leftArrow, .rightArrow:
+                framing = ArtFocus.nudged(f, dx: k == .leftArrow ? -1 : k == .rightArrow ? 1 : 0, dy: k == .upArrow ? -1 : k == .downArrow ? 1 : 0, image: art.size, view: bannerSize)
+            case .return, .space: endFraming(save: true)
+            case .escape, .delete: endFraming(save: false)
+            default: return false
+            }
+            return true
+        }
         let map = macFocusMap
         guard let cur = focus.flatMap({ map.contains($0) ? $0 : nil }) else {
             if [.upArrow, .downArrow, .leftArrow, .rightArrow].contains(k) { focus = map.lines.first?.first; return true }
@@ -616,7 +637,11 @@ struct LauncherView: View {
             Color.clear
                 .overlay {
                     if let art = extras.art {
-                        Image(nsImage: art).resizable().scaledToFill()
+                        if let f = framing {   // Adjust Art: the picture follows a drag, a trackpad's pinch zooms (ArtFramingSurface)
+                            ArtFramingSurface(image: Image(nsImage: art), natural: art.size, focus: Binding(get: { f }, set: { framing = $0 }))
+                        } else {
+                            FramedArt(image: Image(nsImage: art), natural: art.size, focus: artFocus)
+                        }
                     } else {
                         Image(nsImage: extras.backdrop ?? NSApp.applicationIconImage).resizable().interpolation(.high).scaledToFill().opacity(0.8)
                     }
@@ -631,8 +656,10 @@ struct LauncherView: View {
                     LinearGradient(stops: [.init(color: background.opacity(0.55), location: 0), .init(color: background.opacity(0), location: 0.65)],
                                    startPoint: .leading, endPoint: .trailing)
                 }
-                .accessibilityHidden(true)
-                .gesture(WindowDragGesture())
+                .onGeometryChange(for: CGSize.self) { $0.size } action: { bannerSize = $0 }
+                .accessibilityHidden(framing == nil)
+                .gesture(WindowDragGesture(), isEnabled: framing == nil)
+                .contextMenu { if extras.art != nil && framing == nil { Button("Adjust Art…") { beginFraming() } } }
             if extras.art == nil {
                 Image(nsImage: NSApp.applicationIconImage).resizable().interpolation(.high).frame(width: 112, height: 112)
                     .shadow(color: .black.opacity(0.35), radius: 10, y: 4)
@@ -641,6 +668,11 @@ struct LauncherView: View {
                     .accessibilityHidden(true)
                     .allowsHitTesting(false)
             }
+            if framing != nil {
+                ArtFramingBar(hint: "Drag to move the art, or use the arrow keys. Pinch on a trackpad to zoom.", reset: { framing = .centre },
+                              cancel: { endFraming(save: false) }, done: { endFraming(save: true) })
+                    .frame(maxWidth: 460).padding(.horizontal, 24).padding(.bottom, 16)
+            } else {
             VStack(alignment: .leading, spacing: 6) {
                 // the game's logo in place of its name when the app has one: at most 72 pt tall and 60 % of the banner's width; VoiceOver still reads the name
                 if let logo = extras.logo {
@@ -660,6 +692,7 @@ struct LauncherView: View {
                 .padding(.top, 8)
             }
             .padding(.horizontal, 24).padding(.bottom, 20)
+            }
         }
         .frame(height: 248)
         .frame(maxWidth: .infinity)
@@ -676,6 +709,22 @@ struct LauncherView: View {
             .padding(.top, 6).padding(.trailing, 10)
         }
         .clipped()
+    }
+
+    /// Adjust Art (ArtFocus.swift): the banner shows the framing as it is made; Done keeps it in this app's preferences (launcher.artFocus), Cancel leaves it as it was
+    private func beginFraming() {
+        guard extras.art != nil, framing == nil else { return }
+        framing = artFocus
+        AccessibilityNotification.Announcement("Adjust art. Drag to move the art or use the arrow keys, then Done.").post()
+    }
+    private func endFraming(save: Bool) {
+        guard let f = framing else { return }
+        if save {
+            artFocus = f
+            ArtFocus.store(f.isCentre && extras.packedFocus == nil ? nil : f)   // the centre with no framing from the build: nothing to keep
+            fputs("launcher: key art framing \(f.isCentre ? "centred" : "changed")\n", stderr)
+        }
+        framing = nil
     }
 
     /// Play, once the cloud's save is compared with this Mac's: a save that changed on both sides is the player's pick, not the newer file's (SaveCheck)
@@ -1062,6 +1111,7 @@ struct AboutGameSheet: View {
     let about: LauncherExtras.About
     let name: String
     let art: NSImage?
+    var focus = ArtFocus.centre   // framed as the banner shows it
     let tint: NX18RGB?
     @Environment(\.dismiss) private var dismiss
 
@@ -1086,7 +1136,7 @@ struct AboutGameSheet: View {
         VStack(spacing: 0) {
             if let art {
                 Color.clear.frame(height: 150)
-                    .overlay { Image(nsImage: art).resizable().scaledToFill() }
+                    .overlay { FramedArt(image: Image(nsImage: art), natural: art.size, focus: focus) }
                     .clipped()
                     .overlay { LinearGradient(colors: [bg.opacity(0), bg], startPoint: .center, endPoint: .bottom) }
                     .accessibilityHidden(true)

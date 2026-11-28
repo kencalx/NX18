@@ -137,6 +137,9 @@ struct LauncherView: View {
     @State private var cardOpen = false             // the NX 18 card over the hero (NX18Card.swift)
     @State private var cardFocus: NX18CardItem = .picture   // the pad's focus inside the card (§20.1: it starts on the picture)
     @StateObject private var profileFlow = NX18ProfileFlow()  // the card's Profile rows and their flows (NX18ProfileFlow.swift)
+    @State private var artFocus = ArtFocus.centre   // the part of the key art the art side shows (ArtFocus.swift): artwork.focus as the screen opens, the player's framing after Done
+    @State private var framing: ArtFocus?           // the framing mode (Adjust art on the NX 18 card, or a long press on the art): the framing being made, drawn live; nil when not framing
+    @State private var artSize: CGSize = .zero      // the art layer's size, for the pad's steps in the framing mode
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var arrived = LauncherView.arrivedOnce   // the arrival fade has run (once per launch)
     @MainActor static var arrivedOnce = false
@@ -147,6 +150,7 @@ struct LauncherView: View {
     init(m: LauncherModel, dir: URL?, content: LauncherContent, artwork: LauncherArtwork, startWith: LauncherShortcut? = nil, checkAtStart: Bool = false, screen: Int = 0, play: @escaping () -> Void) {
         self.m = m; self.dir = dir; self.artwork = artwork; self.startWith = startWith; self.checkAtStart = checkAtStart; self.screen = screen; self.play = play
         _content = State(initialValue: content)
+        _artFocus = State(initialValue: artwork.focus)
     }
 
     private var name: String { (info("CFBundleDisplayName") as? String) ?? (info("CFBundleName") as? String) ?? "Game" }
@@ -165,6 +169,7 @@ struct LauncherView: View {
         if content.manual != nil { b.append("Manual") }
         return b
     }
+    private var framedArtwork: LauncherArtwork { var a = artwork; a.focus = artFocus; return a }   // About's header: the art framed as the player last kept it
     private var pageBackground: Color { NX18PageColor.page(tint: artwork.tint) }      // the look's page, with the art's tint (12 % dark, 6 % light), under the backdrop
     @State private var housingTrailing = false   // the camera housing is on the settings' side (iPhone landscape, top of the phone to the right)
     // From the window scene's orientation: landscape left has the home side on the left, so the top of the phone, and its camera housing, on the right
@@ -231,7 +236,7 @@ struct LauncherView: View {
                 .preferredColorScheme(.dark)   // the Guide reader stays dark in every look (gate-ui owner check 5)
         }
         .sheet(isPresented: shown(.about), onDismiss: guideAfterClosing) {
-            LauncherAboutSheet(about: content.about ?? LauncherAbout(), artwork: artwork, name: name, version: version, scroller: scroller,
+            LauncherAboutSheet(about: content.about ?? LauncherAbout(), artwork: framedArtwork, name: name, version: version, scroller: scroller,
                                closeGlyph: pad.connected ? pad.glyphs.glyph(.b) : nil, languages: aboutLanguages, badges: aboutBadges,
                                lastPlayed: status.lastPlayed, cloudOn: status.cloud != .off, facts: content.facts,
                                preset: m.activePreset.map { ($0.rawValue, $0.title) }) { sheet = nil }
@@ -319,6 +324,13 @@ struct LauncherView: View {
     private func hero(wide: Bool, width: CGFloat, height: CGFloat) -> some View {
         let iconSide = Swift.min(Swift.max(height * 0.3, wide ? 96 : 72), 150)
         return VStack(alignment: .leading, spacing: 0) {
+          if framing != nil {
+            Spacer(minLength: 0)
+            ArtFramingBar(hint: pad.connected ? "Drag or use the stick to move the art. Pinch, or \(pad.glyphs.name(NXShoulder.l)) and \(pad.glyphs.name(NXShoulder.r)), to zoom."
+                                              : "Drag to move the art. Pinch to zoom.",
+                          glyphs: pad.connected ? pad.glyphs : nil, reset: { framing = .centre }, cancel: { endFraming(save: false) }, done: { endFraming(save: true) })
+                .frame(maxWidth: 420)
+          } else {
             Button { openCard() } label: {
                 NX18Mark(height: 24)
                     .background { if artwork.art != nil { NX18MarkShade(strong: reduceTransparency) } }   // over art only: the plain backdrop is dark already
@@ -355,6 +367,7 @@ struct LauncherView: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { textHeight = $0 }   // the art layer's scrim covers this much
+          }
         }
         .padding(.leading, 24).padding(.trailing, 20).padding(.top, 18).padding(.bottom, 20)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -363,15 +376,27 @@ struct LauncherView: View {
         .environment(\.colorScheme, .dark)   // the art side stays dark in every look: art, scrim, title, status line, Play, Guide, About and the mark (§11a.2)
     }
 
-    // The art aspect-filled and clipped (else the icon enlarged and blurred), fading into the background to the right (beside the settings) and to the bottom
+    // The art aspect-filled and clipped, framed as the player chose (ArtFocus.swift; else the icon enlarged and blurred), fading into the background to the right (beside the
+    // settings) and to the bottom. In the framing mode the art itself takes the drags and pinches (ArtFramingSurface) under the same fades, so it shows as it will be kept
     private func artLayer(wide: Bool) -> some View {
         ZStack {
             background
             Color.clear.overlay {
-                if let art = artwork.art { Image(uiImage: art).resizable().scaledToFill() }
-                else if let icon = artwork.icon { Image(uiImage: icon).resizable().scaledToFill().blur(radius: 60, opaque: true).opacity(0.55).scaleEffect(1.15) }
+                if let art = artwork.art {
+                    if let f = framing {
+                        ArtFramingSurface(image: Image(uiImage: art), natural: art.size, focus: Binding(get: { f }, set: { framing = $0 }))
+                    } else {
+                        FramedArt(image: Image(uiImage: art), natural: art.size, focus: artFocus)
+                            .contentShape(Rectangle())
+                            .onLongPressGesture(minimumDuration: 0.6) { beginFraming() }   // a long press on the art: the framing mode, as Adjust art on the card
+                            .accessibilityHidden(true)
+                    }
+                }
+                else if let icon = artwork.icon { Image(uiImage: icon).resizable().scaledToFill().blur(radius: 60, opaque: true).opacity(0.55).scaleEffect(1.15).accessibilityHidden(true) }
             }
             .clipped()
+            .onGeometryChange(for: CGSize.self) { $0.size } action: { artSize = $0 }
+            Group {
             if wide {
                 LinearGradient(stops: [.init(color: background.opacity(0), location: 0.55), .init(color: background, location: 1)], startPoint: .leading, endPoint: .trailing)
             }
@@ -386,8 +411,10 @@ struct LauncherView: View {
                                        .init(color: background.opacity(reduceTransparency ? 0.95 : 0.86), location: 1)], startPoint: .top, endPoint: .bottom)
                     .frame(height: textHeight + 48 + 20 + 24)   // above the name, the hero's bottom padding, and the bottom safe area it runs into
             }
+            }
+            .allowsHitTesting(false)   // the fades never take a touch: a long press or the framing's drags reach the art
+            .accessibilityHidden(true)   // decorative
         }
-        .accessibilityHidden(true)   // decorative
     }
 
     // A soft shade down from the top edge, behind the small NX 18 mark, so it reads over bright art (a sky, a white field): black at a third at the very top (a little more
@@ -542,7 +569,8 @@ struct LauncherView: View {
                     .ignoresSafeArea().contentShape(Rectangle()).onTapGesture { closeCard() }
                     .accessibilityLabel("Close the NX 18 card").accessibilityAddTraits(.isButton)
                 NX18Card(gameVersion: version, focused: pad.connected ? cardFocus : nil, glyphs: pad.connected ? pad.glyphs : nil, close: { closeCard() }, art: artwork.art != nil,
-                         profileRows: cardProfileRows, scrolls: wide && verticalSizeClass == .compact)   // short of height (iPhone landscape): the body scrolls
+                         profileRows: cardProfileRows, scrolls: wide && verticalSizeClass == .compact,   // short of height (iPhone landscape): the body scrolls
+                         adjustArt: artwork.art != nil ? { closeCard(); beginFraming() } : nil)
                     .frame(width: w)
                     .frame(maxHeight: g.size.height - 58 - 21, alignment: .top)   // §20.1: in iPhone landscape the body scrolls under the fixed header
                     .padding(.leading, 16).padding(.top, 58)
@@ -566,7 +594,30 @@ struct LauncherView: View {
             if case .chosen = NX18Profile.shared.folderState { o.append(contentsOf: [.saves, .captures]) }
         }
         o.append(.appearance)
+        if artwork.art != nil { o.append(.art) }   // Adjust art, last: only with key art
         return o
+    }
+
+    // The framing mode (ArtFocus.swift): the art side shows the framing as it is being made, over the real layout; drag or the stick moves it, pinch or L / R zoom, A or Done
+    // keeps it, B or Cancel leaves it as it was, X or Reset goes back to the centre. Kept in this app's preferences (launcher.artFocus) for every Gate layout
+    private func beginFraming() {
+        guard artwork.art != nil, framing == nil else { return }
+        stopAutoStart("the art's framing opened")
+        withAnimation(.easeOut(duration: 0.2)) { framing = artFocus }
+        pad.holdUntilReleased()
+        AccessibilityNotification.Announcement("Adjust art. Drag to move the art, pinch to zoom, then Done.").post()
+    }
+    private func endFraming(save: Bool) {
+        guard let f = framing else { return }
+        if save {
+            artFocus = f
+            // the centre with no framing from the build: nothing to keep (the art is drawn as it always was); with one, the centre is the player's own choice over it
+            ArtFocus.store(f.isCentre && artwork.packedFocus == nil ? nil : f)
+            fputs("launcher: key art framing \(f.isCentre ? "centred" : "changed")\n", stderr)
+        }
+        withAnimation(.easeOut(duration: 0.2)) { framing = nil }
+        if pad.connected { focus = .play }
+        pad.holdUntilReleased()
     }
 
     private func stopAutoStart(_ why: String) {
@@ -662,6 +713,10 @@ struct LauncherView: View {
                   savesInNX18Folder: profileFlow.cloudShared, gateAtStartLocked: launcherFromEnv, footer: AnyView(panelFooter), acknowledgements: LauncherNotices.available,
                   touched: { focus = $0 }, act: gateAct)
             .background { LauncherBackdrop(wash: artwork.wash, page: pageBackground, edge: background, blend: blend).ignoresSafeArea() }
+            .accessibilityHidden(framing != nil)
+            .overlay {   // the framing mode: the settings stay in place, dimmed, and take no touch until Done or Cancel
+                if framing != nil { Color.black.opacity(0.5).ignoresSafeArea().contentShape(Rectangle()).onTapGesture {}.accessibilityHidden(true).transition(.opacity) }
+            }
             .sheet(isPresented: $cloudPicking, onDismiss: guideAfterClosing) {
                 DocumentPicker(types: [.folder]) { url in
                     cloudPicking = false
@@ -793,6 +848,18 @@ struct LauncherView: View {
     private var stackedChips: Bool { typeSize >= .xxLarge }   // the panel's 2 × 2 (and one column) chips: two a line for the controller too
 
     private func handle(_ e: LauncherPadEvent) {
+        if let f = framing, let art = artwork.art {   // the framing mode: the stick and D-pad move the window over the art, L / R zoom, A keeps, B cancels, X centres
+            switch e {
+            case .up, .down, .left, .right:
+                framing = ArtFocus.nudged(f, dx: e == .left ? -1 : e == .right ? 1 : 0, dy: e == .up ? -1 : e == .down ? 1 : 0, image: art.size, view: artSize)
+            case .l, .r: framing = ArtFocus.zoomed(f, to: f.zoom + (e == .r ? 1 : -1) * ArtFocus.zoomStep, image: art.size, view: artSize)
+            case .a: endFraming(save: true)
+            case .b: endFraming(save: false)
+            case .x: framing = .centre
+            default: break
+            }
+            return
+        }
         if cardOpen {   // the NX 18 card: up / down between ✕ and Appearance, left / right step Appearance, A presses, B closes; L / R wait until it closes (§20.1)
             switch e {
             case .up, .down:
@@ -809,6 +876,7 @@ struct LauncherView: View {
                 case .folder: profileFlow.chooseFolder(pad: true)
                 case .saves: profileFlow.savesTapped()
                 case .captures: profileFlow.capturesTapped()
+                case .art: closeCard(); beginFraming()
                 }
             case .b: closeCard()
             default: break

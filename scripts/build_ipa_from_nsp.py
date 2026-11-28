@@ -33,6 +33,7 @@
 #   version (the base game alone, another update) from a profile derived from it in <build folder>/profile: the same settings, and the version's own shaders (derive_profile).
 # The launcher shows the game's key art, its "About this game" text and its manual: ART / --art gives the art, else (ART_ONLINE, on) the build downloads it, the banner and text from titledb (the whole list, into ~/Library/Caches/nxnative/titledb/,
 #   so the list's host is sent no title ID; the banner itself comes from Nintendo's image server, which so learns the game), else a hero image from SteamGridDB when a key is set (STEAMGRIDDB_KEY, or the environment variable of that name); ART_ONLINE = False / --no-art-online keeps the build offline.
+#   ART_FOCUS / --art-focus x,y[,zoom] says which part of the art the Gate shows (dm/art_focus.json beside it; the player can frame it again in the app: Adjust art on the NX 18 card).
 #   With a key, SteamGridDB's textless hero and the game's logo come as a pair, the logo shown in place of the name (LOGO / --logo gives your own logo). Without art the launcher blurs the app icon. MANUAL / --manual packs a PDF manual of your own. They are settled once per app in <build folder>/art/ (scripts/game_art.py) and reused by the next build without the network.
 # UI_FONT / --ui-font: one font of your own (a TTF, OTF or TTC on this Mac) for all of NX 18's own text in the app built here: the launcher, the in-game prompts and progress screens,
 #   the Mac banner and Cheats window (not the game's own text, and not what the system draws: menus, alerts, title bars). It goes into the app as dm/uifont/ui.<ext>, its PostScript name into
@@ -48,7 +49,7 @@
 # unless ALLOW_OTHER_METAL / --allow-other-metal. Issue #242 reported corruption with another compiler; the cause is still unconfirmed.
 # Python 3.12+ is required for bounded archive mappings inside images. The Python running this file needs lz4, capstone 5.x, fonttools and zbic (and backports.zstd before Python 3.14); also needed: Xcode, xcodegen, zstd. SPIRV-Cross is the in-repo build. A first run takes 2 (Metroid Dread) to 10 minutes (Breath of the Wild: 5 of them the shader split), longer when shader libraries must be compiled; a repeat run with unchanged inputs takes about 20 s (Metroid Dread), mostly packing the IPA. Key values (prod.keys, the SteamGridDB key) are never printed.
 # The console shows one line per stage ([k/n] stage, with a bar, done/total, percent, elapsed time and ETA where the work can be counted); the tools' own output goes only to logs/ (PROGRESS / --progress). --progress json writes newline-delimited JSON events to stdout.
-import ast, collections, concurrent.futures, contextlib, ctypes, errno, getpass, hashlib, importlib.util, json, os, re, shlex, shutil, signal, struct, subprocess, sys, tempfile, threading, time, types, typing
+import ast, collections, concurrent.futures, contextlib, ctypes, errno, getpass, hashlib, importlib.util, json, math, os, re, shlex, shutil, signal, struct, subprocess, sys, tempfile, threading, time, types, typing
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "dm/tools"))
 import romfs as rfs
@@ -80,6 +81,7 @@ ICON = ''                               # the app icon, a JPEG or PNG of any siz
 FALLBACK_ICON = ''                      # the app icon only when ICON is empty and the game has none of its own (a dump, a NUP or an NX without one); empty = such an app gets NX Play's saved icon (NXPLAY_ICONS), else the NX 18 icon
 NXPLAY_ICONS = '~/Library/Caches/com.varyform.nxplay/Banners/icons'   # where NX Play keeps each game's icon (<title ID>.jpg): the app icon when ICON and FALLBACK_ICON are empty and the game has none of its own (empty = never looked at, such an app gets the NX 18 icon)
 ART = ''                                # the launcher's key art, a JPEG or PNG of any size (empty = found online when ART_ONLINE is on, else none: the launcher blurs the app icon)
+ART_FOCUS = ''                          # the key art's framing in the Gate: 'x,y' or 'x,y,zoom', the point of the art it centres on (0 to 1 across and down) and a zoom (1 to 3); empty = the middle. The player's own framing in the app (Adjust art) comes first
 LOGO = ''                               # the launcher's logo shown in place of the game's name, the game's title wordmark as a PNG or WebP with transparency (empty = SteamGridDB's with a key, over its textless hero or your art; none over a titledb banner, which has the logo painted in)
 ART_ONLINE = True                       # find the launcher's art and "About this game" text online: titledb, then SteamGridDB (with a key); False = no network at all (art an earlier online build downloaded into <build folder>/art/ is still used)
 STEAMGRIDDB_KEY = ''                    # a SteamGridDB API key, for art titledb lacks (empty = the STEAMGRIDDB_KEY environment variable, else SteamGridDB is skipped); sent only to SteamGridDB, never printed or saved
@@ -2619,6 +2621,28 @@ def table_difference(name, profile, split):
     return '\n'.join(out)
 
 
+def split_tables(g):
+    """Whether game profile g registers no shader tables and takes them from each build's own split (game.tsv tables_from split, dm/games/README.md): a shader-only derived
+    profile, as for installed DLC, so every registered setting and fix applies and only the tables are this build's. For a game whose legally owned and acquired files come in
+    more than one layout that split to other shader sets (Super Mario Bros. Wonder – Nintendo Switch 2 Edition's merged and two-program NUPs), so that no one set of tables
+    matches every copy. Every other profile keeps the strict comparison (split_shaders)"""
+    v = g.get('tables_from', 'registered')
+    if v not in ('registered', 'split'): raise BuildError(f'game profile {g.id}: tables_from must be registered or split, not {v!r} (dm/games/README.md)')
+    return v == 'split'
+
+
+def seed_check(g):
+    """The prewarm list (pso_manifest.tsv) checked against this build's own shader map, for a profile with no committed map to check it against (split_tables): every row the
+    host would keep, as dm/tools/pso_seed.py reads it. A row it refuses is left out by the app too (nvn_mtl.m warm_map_stage), so it is a red line, not a stop"""
+    p = g.table('pso_manifest.tsv')
+    if not p.is_file(): return
+    import pso_seed
+    rows = pso_seed.rows_of(p.read_bytes().decode('utf-8', 'replace'), strip_cr=False)
+    keep, bad = pso_seed.collect(rows, pso_seed.read_map(g.table('shader_map.tsv')))
+    if bad: say(f'[RED] prewarm list: {len(bad):,} of {len(rows):,} rows are not in this build\'s shader map, and the app leaves them out (the first: {bad[0][1]})')
+    else: say(f'prewarm list: {len(keep):,} rows, every one in this build\'s shader map')
+
+
 OPTIONAL_SOURCES = ('/aoc/', '/glslc_play/')   # shader map sources a build may have or not: installed DLC, the shaders captured in play (gather_glslc_play)
 
 
@@ -3331,13 +3355,13 @@ def mac_app_name(name):   # the app's file name: the game name with the characte
     return re.sub(r'\s*[:/]\s*', ' - ', name).encode()[:200].decode('utf-8', 'ignore').strip(' .-') or 'nxnative'
 
 
-def mac_app(py, repo, out, app, work, game, patched, host, font, msl, aoc, gfx, lang, g, name, version, bundle_id, icon, sign, env, logs, env_file='', gpus='', programs=None, control=None, gpu_option=True, art=None, about=None, manual=None, logo=None, ui_font=None, stamp=(None, None), facts=None):
+def mac_app(py, repo, out, app, work, game, patched, host, font, msl, aoc, gfx, lang, g, name, version, bundle_id, icon, sign, env, logs, env_file='', gpus='', programs=None, control=None, gpu_option=True, art=None, about=None, manual=None, logo=None, ui_font=None, stamp=(None, None), facts=None, art_focus=None):
     """The last stage of PLATFORM 'mac-app': pack the Mac app (dm/mac/pack_app.py) from what a Mac-only build made: the Mac host and font (mac_host), the packed version's RomFS and rewritten
     modules, the Mac shader libraries (msl: <shader>/cache, whose b-<chain> goes in), the DLC, the profile's tables (with the shader pairs
     the pipeline prebuild reads), the pipeline archive made offline for this Mac (mac_pso; gpus: --gpu / PSO_GPUS, gpu_option: from --gpu), the launcher settings and an environment file.
     The save and the log go to the player's Library, keyed by the folder's title ID (app); a new app replaces the old one only when it is complete. programs: a game of several programs, the others' files
     (other_programs), which go in beside the first's as one app. control: the control.nacp that lists the game's languages (languages_control), by default the packed version's.
-    art, about, manual, logo: the launcher's key art, "About this game" text, manual and the game's logo (launcher_art), each None without one.
+    art, about, manual, logo: the launcher's key art, "About this game" text, manual and the game's logo (launcher_art), each None without one; art_focus: the art's framing (--art-focus).
     ui_font: (path, PostScript name, family) of --ui-font / UI_FONT (ui_font_info), None for the system font"""
     lib = msl / f'b-{chain_of(repo)}'
     pso = mac_pso(py, repo, work, lib, g, gpus, env, logs, gpu_option) if gfx == 'nvn' and g.table('shader_pairs.tsv').is_file() else None   # a stage of its own, before the app's
@@ -3350,7 +3374,8 @@ def mac_app(py, repo, out, app, work, game, patched, host, font, msl, aoc, gfx, 
     split_pairs = work / 'shader/pso_pairs.tsv'   # the split's copy of pso_pairs.tsv, for a profile without the table (as mac_run's DM_PSO_PAIRS)
     for opt, v in (('--version', version), ('--category', g.get('app_category')), ('--marker', g.get('romfs_marker')), ('--aoc', aoc), ('--icon', icon),
                    ('--pso', pso), ('--pso-pairs', split_pairs if gfx == 'nvn' and not g.table('pso_pairs.tsv').is_file() and split_pairs.is_file() else None),
-                   ('--env-file', Path(os.path.expanduser(env_file)).resolve() if env_file else None), ('--settings', settings), ('--art', art), ('--logo', logo), ('--about', about), ('--manual', manual), ('--facts', facts)):
+                   ('--env-file', Path(os.path.expanduser(env_file)).resolve() if env_file else None), ('--settings', settings), ('--art', art), ('--logo', logo), ('--about', about), ('--manual', manual), ('--facts', facts),
+                   ('--art-focus', art_focus if art else None)):
         if v: cmd += [opt, v]
     if ui_font: cmd += ['--ui-font', ui_font[0], '--ui-font-name', ui_font[1]]
     if stamp[0]: cmd += ['--built-by', stamp[0]]
@@ -3399,6 +3424,8 @@ def parse_args(argv):
     ap.add_argument('--fallback-icon', help='the app icon only when --icon / ICON is not given and the game has none of its own (a dump, a NUP or an NX without one), a JPEG or PNG of any size: a game with its own icon '
                     'keeps it, so a front end can pass a stand-in without knowing what the game carries (default: the FALLBACK_ICON setting, else the icon NX Play saved for the game (the NXPLAY_ICONS setting), else such an app gets the NX 18 icon)')
     ap.add_argument('--art', help='the launcher\'s key art, a JPEG or PNG of any size (default: the ART setting, else found online: titledb, then SteamGridDB with a key; without one the launcher blurs the app icon)')
+    ap.add_argument('--art-focus', metavar='X,Y[,ZOOM]', help='which part of the key art the Gate shows: the point it centres on, x and y from 0 to 1 across and down (0.5,0.5 the middle), and a zoom '
+                    'from 1 to 3 (default: the ART_FOCUS setting, else the middle); the player can frame it again in the app (Adjust art on the NX 18 card), which then comes first')
     ap.add_argument('--logo', help='the launcher\'s logo, shown in place of the game\'s name: the game\'s title wordmark, a PNG or WebP with transparency (default: the LOGO setting, else SteamGridDB\'s with a key, '
                     'over its textless hero or your art; none over a titledb banner, which has the logo painted in)')
     ap.add_argument('--art-online', action=argparse.BooleanOptionalAction, help='find the launcher\'s art and "About this game" text online: titledb (the whole list, cached in ~/Library/Caches/nxnative/titledb), then SteamGridDB '
@@ -3461,6 +3488,19 @@ def no_game_icon_line(nup, dump, icon, blank):
     hint = ("--icon / ICON gives it the game's, --fallback-icon / FALLBACK_ICON a stand-in of your own" if icon
             else '--icon / ICON or --fallback-icon / FALLBACK_ICON gives it one')   # the fallback is taken only when the game has no icon of its own (app_icon)
     return f'{why}; {then}' + (f'; {hint}' if dump else '')
+
+
+def art_focus(value, option='--art-focus / ART_FOCUS'):
+    """The key art's framing an option or setting gives, 'x,y' or 'x,y,zoom' (x and y from 0 to 1, the point of the art the Gate centres on; zoom from 1 to 3), as 'x,y,zoom' with at most
+    3 places; None when it is empty. Checked when the build starts. The app keeps the player's own framing over it (dm/ios/Sources/ArtFocus.swift)"""
+    if not value or not value.strip(): return None
+    parts = value.split(',')
+    try: nums = [float(p) for p in parts]
+    except ValueError: nums = []
+    if len(parts) not in (2, 3) or len(nums) != len(parts) or not all(math.isfinite(n) for n in nums) or not (0 <= nums[0] <= 1 and 0 <= nums[1] <= 1) or (len(nums) == 3 and not 1 <= nums[2] <= 3):
+        raise BuildError(f'the art framing ({option}) is x,y or x,y,zoom, x and y from 0 to 1 and zoom from 1 to 3: {value}')
+    if len(nums) == 2: nums.append(1.0)
+    return ','.join(f'{n or 0.0:.3f}'.rstrip('0').rstrip('.') for n in nums)   # -0 as 0: build_ipa.sh takes digits only
 
 
 def icon_file(value, option):
@@ -3744,6 +3784,7 @@ def main(args=None):
     user_icon = icon_file(args.icon or ICON, '--icon / ICON'); spare_icon = icon_file(args.fallback_icon or FALLBACK_ICON, '--fallback-icon / FALLBACK_ICON')
     user_art = Path(os.path.expanduser(args.art or ART)).resolve() if args.art or ART else None   # the launcher's art and manual, checked now too
     if user_art and not user_art.is_file(): raise BuildError(f'no such art file (--art / ART): {user_art}')
+    focus = art_focus(args.art_focus or ART_FOCUS)   # the art's framing (dm/art_focus.json), checked now too
     user_logo = Path(os.path.expanduser(args.logo or LOGO)).resolve() if args.logo or LOGO else None
     if user_logo and not user_logo.is_file(): raise BuildError(f'no such logo file (--logo / LOGO): {user_logo}')
     manual = Path(os.path.expanduser(args.manual or MANUAL)).resolve() if args.manual or MANUAL else None
@@ -3999,10 +4040,13 @@ def main(args=None):
         g = gamemod.load(g.id)
         say(f'{derived}: using a shader-only derived profile at {g.dir}; registered module fixes are preserved')
         return g
+    from_split = not own and split_tables(g)   # a profile that registers no shader tables (tables_from split): this build's split makes them, in a shader-only derived profile
+    if from_split: derive_shader_tables(f'game profile {g.id} registers no shader tables (tables_from split), so this build\'s own shader split makes them'); own = True
     derive_dlc = (lambda: derive_shader_tables('the installed DLC or the shaders captured in play (glslc_play) differ from the registered tables')) if not own else None
     derive_compute = (lambda: derive_shader_tables('the reader decoded additional compute kernels from this registered build')) if not own else None
     pkey = split_shaders(py, repo, [rfs.source(dirs[v]) for v in sv], [dirs[v] / 'ExeFS/main' for v in sv], sh / 'pkg', env, logs, g, own, oodle, dlc_roms, derive_dlc, derive_compute)
     if observed_glslc is not None: check_glslc_coverage(observed_glslc, g)
+    if from_split: seed_check(g)
     seen = seen_keys(g, sh, seen_logs(work, app)) if seen_shaders else None
     ios = build_shaders(py, repo, sh, xlate, env, logs, g, pkey, mac, seen, None if mac else ios_wants_pulling(g, ios_gpus((args.gpu or PSO_GPUS).strip(), g), prepare_xcode, env))
     motion = MOTION if args.motion is None else args.motion
@@ -4018,7 +4062,7 @@ def main(args=None):
         if not game_icon: say(no_game_icon_line(nup, dump, icon, "app's icon"))
         mac_app(py, repo, out_ipa, app, work, game, patched, host, font, ios, aoc, gfx, lang, g, app_name, app_version, bundle_id, icon, args.mac_sign or MAC_SIGN, env, logs, env_file,
                 (args.gpu or PSO_GPUS).strip(), programs, control, gpu_option=bool((args.gpu or '').strip()),
-                art=art, about=about, manual=manual, logo=logo, ui_font=ui_font, stamp=(built_by, stamp_id), facts=facts)
+                art=art, about=about, manual=manual, logo=logo, ui_font=ui_font, stamp=(built_by, stamp_id), facts=facts, art_focus=focus)
         cdirs = [(d, b) for d, b in [(packed_cheats, cheat_build)] + [(programs[n].get('cheats'), programs[n].get('build')) for n in sorted(programs)] if d]   # each program's own cheats too, under its builds' IDs
         c = merge_cheats(cdirs, work / MODS_STAGE / 'programs_cheats') if len(cdirs) > 1 else cdirs[0][0] if cdirs else None
         if c: install_cheats(c, Path.home() / 'Library/Application Support/nxnative' / f'{app:016X}' / 'cheats')   # the app's DM_ROOT (dm/mac/launcher.c)
@@ -4062,6 +4106,7 @@ def main(args=None):
     if icon: ipa_env['DM_ICON'] = str(icon); say(f'app icon: {icon}')   # app icon (found above)
     for k, v in (('DM_ART', art), ('DM_LOGO', logo), ('DM_ABOUT', about), ('DM_MANUAL', manual), ('DM_FACTS', facts)):   # the launcher's art, logo, "About this game" text and manual (launcher_art): dm/ in the app, once for every program
         if v: ipa_env[k] = str(v)
+    if art and focus: ipa_env['DM_ART_FOCUS'] = focus; say(f'key art framing: {focus}')   # dm/art_focus.json beside the art (build_ipa.sh)
     ipa_env['DM_BUILD_ID'] = stamp_id
     if built_by: ipa_env['DM_BUILT_BY'] = built_by
     if ui_font: ipa_env['DM_UI_FONT'], ipa_env['DM_UI_FONT_NAME'] = str(ui_font[0]), ui_font[1]   # the UI font: dm/uifont/ in the app, its name in Info.plist (build_ipa.sh)

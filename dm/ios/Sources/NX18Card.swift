@@ -2,12 +2,13 @@
 // the game's version, and holds the one look setting, Appearance (G20, §20.5b): Match device (the default), Light or Dark. It closes with ✕, B, Escape or a tap outside, and
 // focus goes back to the mark. Above Appearance (the owner's order, 2026-11-17), the Profile (F10, §20.2 items 4-7): the picture and name the games see, the Profile and NX 18 folder switch, the NX 18 folder and
 // This game's saves. The flows behind the rows (the photo picker and crop, the name bar, the folder pick, the move) are the platform's: NX18ProfileFlow.swift on iOS.
+// Below Appearance, with key art, Adjust art (ArtFocus.swift): an action that opens the Gate's framing mode on the art, no setting of its own.
 // In iPhone landscape the header stays and the body scrolls under it, the pad's focused row scrolled into view (§20.1).
 // Look: the solid inner fill of the look's Gate set, all text on it, and a 6 pt rim: glass over the key art where allowed, else solid with a hairline (§11, §20.4). Built on open, freed on close
 import ImageIO
 import SwiftUI
 
-enum NX18CardItem: String, Sendable, CaseIterable { case close, appearance, picture, name, profile, folder, saves, captures }
+enum NX18CardItem: String, Sendable, CaseIterable { case close, appearance, picture, name, profile, folder, saves, captures, art }
 
 // What the card's Profile rows show and do; the platform builds it (iOS: from NX18ProfileFlow). nil: the card shows no Profile section
 struct NX18CardProfile {
@@ -30,6 +31,7 @@ struct NX18Card: View {
     var art = false                       // key art behind the card: its rim may be glass (§11); without it the card is solid
     var profileRows: NX18CardProfile? = nil
     var scrolls = false                   // iPhone landscape: the header stays, the body scrolls under it
+    var adjustArt: (() -> Void)? = nil    // Adjust art: the Gate's framing mode for the key art (ArtFocus.swift); nil without key art, and the row is not shown
     @State private var look = NX18Appearance.current
     @ObservedObject private var profile = NX18Profile.shared
     @Environment(\.colorScheme) private var scheme
@@ -86,6 +88,7 @@ struct NX18Card: View {
             appearanceRow.id(NX18CardItem.appearance)
             Text("Light or dark menus. Match device follows the device.").nxFont(.caption).foregroundStyle(GateColor.muted)
                 .fixedSize(horizontal: false, vertical: true)
+            if let adjustArt { row(.art, "Key art", "Choose the part the Gate shows", action: adjustArt, button: "Adjust") }   // an action, not a setting: the framing is made on the art itself
             if let glyphs {
                 if let s = profileRows?.strip { Text(s).nxFont(.caption).foregroundStyle(GateColor.text).fixedSize(horizontal: false, vertical: true) }
                 HStack(spacing: 14) {
@@ -101,6 +104,7 @@ struct NX18Card: View {
         case .appearance?: return "Change"
         case .profile?, .saves?, .captures?: return "Change"
         case .folder?: return "Choose"
+        case .art?: return "Adjust"
         case .picture?, .name?: return "Edit"
         default: return "Close"
         }

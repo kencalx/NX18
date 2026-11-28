@@ -88,6 +88,7 @@ struct LauncherFacts: Decodable, Equatable, Sendable {
 
 struct LauncherContent: Equatable, Sendable {
     var art: URL?
+    var artFocus: URL?     // dm/art_focus.json, the build's framing of the art (ArtFocus.swift; the player's own, in the preferences, comes first)
     var logo: URL?         // dm/logo.png, the game's title wordmark with transparency (scripts/game_art.py: SteamGridDB's, or the player's --logo)
     var about: LauncherAbout?
     var facts = LauncherFacts()   // dm/facts.json (About's age rating, tested line, known issue, mod credits)
@@ -111,6 +112,7 @@ struct LauncherContent: Equatable, Sendable {
         }
         var c = LauncherContent()
         c.art = file("art.jpg")
+        c.artFocus = file(ArtFocus.file)
         c.logo = file("logo.png")
         c.manual = file("manual.pdf")
         if let a = file("about.json"), let data = try? Data(contentsOf: a) {
@@ -187,6 +189,8 @@ struct LauncherArtwork {
     var logoDark = false   // a black wordmark, drawn with a light glow (NX18Logo.isDark)
     var tint: NX18RGB?
     var wash: UIImage?   // the settings side's backdrop (LauncherBackdrop): the art, or the icon, as a 48 × 27 blurred colour field; made once here, drawn scaled up
+    var focus = ArtFocus.centre     // the part of the art the Gate shows (ArtFocus.swift): the player's own framing, else the build's, else the centre
+    var packedFocus: ArtFocus?      // the build's (dm/art_focus.json): with one, a framing set back to the centre is kept as the player's choice (LauncherView.endFraming)
 
     @MainActor static func load(_ content: LauncherContent) -> LauncherArtwork {
         var w = LauncherArtwork()
@@ -196,6 +200,8 @@ struct LauncherArtwork {
             if let cg = NX18Logo.decode(u) { w.logo = UIImage(cgImage: cg); w.logoDark = NX18Logo.isDark(cg) } else { fputs("[RED] launcher: dm/logo.png cannot be decoded; showing the name\n", stderr) }
         }
         w.icon = appIcon()
+        w.packedFocus = ArtFocus.packed(at: content.artFocus)
+        w.focus = ArtFocus.resolve(saved: ArtFocus.saved(), packed: w.packedFocus)
         w.tint = (w.art ?? w.icon)?.cgImage.flatMap(NX18Palette.average)
         w.wash = wash(w.art ?? w.icon)
         return w

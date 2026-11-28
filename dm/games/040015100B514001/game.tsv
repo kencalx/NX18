@@ -1,0 +1,44 @@
+# Super Mario Bros. Wonder – Nintendo Switch 2 Edition + Meetup in Bellabel Park 1.2.1 (Switch 2 program 1 of application 010015100B514000; SDK 21.4.1 Ounce, Nintendo EPD's engine, NVN2).
+
+# ---- Identity ----
+title_id	040015100B514001
+program_id	040015100B514001
+
+# ---- App ----
+name	Super Mario Bros. Wonder – Nintendo Switch 2 Edition + Meetup in Bellabel Park
+ipa	SuperMarioBrosWonderNintendoSwitch2EditionMeetup.ipa
+app_category	public.app-category.action-games
+
+# ---- Versions ----
+build	v0	1.2.1	main=ec47e6f8846d2a7b6892e2682845c725	subsdk0=3fddebac0ad5c3f9e018dcadca9e55ed	sdk=31945f745022d0232d2562252641b3d3
+package	v0
+shader_versions	v0
+
+# ---- Files ----
+# The Switch 1 program (010015100B514000) has no subsdk0 (NintendoSDK_movie)
+modules	main subsdk0 sdk
+# a file in program 1's merged RomFS (upstream's marker: the packer checks the selected program's own image)
+romfs_marker	System/RegionLangMask.txt
+zip_store	.bwav:.zs:.metallib
+
+# ---- Memory ----
+# The Switch 2's 9 GB pool; the heap check (upstream, 2026-11-14) found a 4.94 GB heap, which mem_reserve holds. The same values ran on an iPhone 18 Pro Max from the provisional profile (2026-11-27: memory pool 9.00 GB, guest files 9.88 GB, heap 4.94 GB, alias region mapped up to +2.27 GB of 4.38 GB)
+mem_reserve	0x278000000
+mem_alias	0x118000000
+mem_stack	0x10000000
+app_pool	0x240000000
+# the NPDM declares 16 MB of system resource
+sys_resource	0x1000000
+# MapPhysicalMemory refused past the 9 GB pool, as on Horizon: upstream's host turns it on for every Switch 2 game (NXNative a694f1799, not ported) and played this game so; NX 18's default is off
+mem_map_limit	on
+
+# ---- Graphics ----
+# The game sets conditional rendering (SetRenderEnableConditional): upstream's host evaluates it for every game and played this one so; NX 18 evaluates it only with this key (without it, a red line and everything drawn)
+render_cond	on
+
+# ---- Shader split ----
+# No registered shader tables: each build's own split makes them (scripts/build_ipa_from_nsp.py split_tables, a shader-only derived profile). The merged 1.2.1 NUP splits to 37,306 keys,
+# the two-program layout upstream registered to 30,630, so no one set of tables matches every legally owned and acquired copy and the strict comparison would stop one of them
+tables_from	split
+shader_groups	/Lib/=lib /Layout/=layout /Effect/=effect
+shader_note	Super Mario Bros. Wonder – Nintendo Switch 2 Edition + Meetup in Bellabel Park shaders

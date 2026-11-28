@@ -288,8 +288,8 @@ private struct HomeTile: View {
     }
 }
 
-/// Beam Home's backdrop, after the phone's Gate (dm/ios/Sources/Launcher.swift): the selected game's key art (Beam's last build's, else the banner NX Play cached),
-/// else its icon, blurred and dimmed, faded into the background by gradients from the top and the bottom. Cross-fades as the selection moves; still under Reduce Motion
+/// Beam Home's backdrop, after the phone's Gate (dm/ios/Sources/Launcher.swift): the selected game's key art (Beam's last build's, else the banner NX Play cached), framed as the
+/// player chose (LibraryGame.artFocus), else its icon, blurred and dimmed, faded into the background by gradients from the top and the bottom. Cross-fades as the selection moves; still under Reduce Motion
 struct HomeBackdrop: View {
     let game: LibraryGame?
     var subtle = false   // behind a page of text (the game's page): far fainter, faded out by a third of the way down
@@ -304,10 +304,11 @@ struct HomeBackdrop: View {
 
     var body: some View {
         let bg = NX18Palette.background
+        let art = game.flatMap(Self.art(for:))
         ZStack {
-            if !reduceTransparency, let g = game, let img = Self.art(for: g) ?? GameIcon.image(for: g) {
+            if !reduceTransparency, let g = game, let img = art ?? GameIcon.image(for: g) {
                 Color.clear.overlay {   // the art fills the space it is given, never sizes it: a large picture made Home wider and taller than the window (no scrolling, columns off screen)
-                    Image(nsImage: img).resizable().scaledToFill()
+                    FramedArt(image: Image(nsImage: img), natural: img.size, focus: art != nil ? g.artFocus ?? .centre : .centre)   // the key art framed as the player chose (Adjust Framing)
                         .blur(radius: subtle ? 80 : 60, opaque: true).opacity(subtle ? 0.22 : 0.55).scaleEffect(1.15)
                 }
                 .clipped()

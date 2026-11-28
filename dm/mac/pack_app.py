@@ -104,7 +104,8 @@ def swift_sources():   # the settings window, with the iOS launcher's model and 
             HERE.parent / 'ios/Sources/LauncherPanel.swift', HERE.parent / 'ios/Sources/LauncherFocus.swift', HERE.parent / 'ios/Sources/NX18Look.swift',
             HERE.parent / 'ios/Sources/NX18Glass.swift', HERE.parent / 'ios/Sources/NXButtonGlyph.swift', HERE.parent / 'ios/Sources/NXButtonGlyphData.swift',
             HERE.parent / 'ios/Sources/NX18Card.swift', HERE.parent / 'ios/Sources/NX18Profile.swift',
-            HERE.parent / 'ios/Sources/GameDocuments.swift']   # the player's documents on the Manual pill
+            HERE.parent / 'ios/Sources/GameDocuments.swift',   # the player's documents on the Manual pill
+            HERE.parent / 'ios/Sources/ArtFocus.swift']   # the key art's framing (the banner's Adjust Art)
 
 
 def notices():   # the third-party notices (dm/tools/third_party_notices.py), which every app carries as Resources/dm/ThirdPartyNotices.txt: the window's Acknowledgements (Launcher.swift)
@@ -410,6 +411,11 @@ def pack(a):
         else:
             try: fit(a.art, dm / 'art.jpg', 'jpeg', 1920)
             except SystemExit as e: (dm / 'art.jpg').unlink(missing_ok=True); print(f'[RED] launcher art: cannot pack {a.art} ({e}); the app is built without it (the launcher blurs the icon)', flush=True)
+    if a.art_focus and (dm / 'art.jpg').is_file():   # the art's framing (the NSP script's --art-focus, already x,y,zoom): Resources/dm/art_focus.json, which the window's own framing (launcher.artFocus) replaces
+        try:
+            x, y, z = (float(v) for v in a.art_focus.split(','))
+            (dm / 'art_focus.json').write_text(json.dumps({'x': x, 'y': y, 'zoom': z}) + '\n')
+        except ValueError: print(f'[RED] launcher art framing: {a.art_focus} is not x,y,zoom; the app is built with the middle of the art', flush=True)
     if a.logo:   # the game's logo, shown in place of its name: the NSP script's logo.png as it is (a PNG, longest side at most 1200), any other image (a WebP) converted to a PNG keeping its alpha, as build_ipa.sh does; a failure is a line
         if Path(a.logo).suffix.lower() == '.png': shutil.copyfile(a.logo, dm / 'logo.png')
         else:
@@ -504,6 +510,7 @@ def parse(argv):
     ap.add_argument('--version'); ap.add_argument('--bundle-id'); ap.add_argument('--category'); ap.add_argument('--lang'); ap.add_argument('--marker', help='the profile\'s romfs_marker')
     ap.add_argument('--icon', help='the game icon (icon.jpg from the control data)')
     ap.add_argument('--art', help='the launcher\'s key art, a JPEG or PNG (Resources/dm/art.jpg; the NSP script\'s <build folder>/art/art.jpg)')
+    ap.add_argument('--art-focus', help='the key art\'s framing, x,y,zoom (Resources/dm/art_focus.json; the NSP script\'s --art-focus); without it the window shows the middle of the art')
     ap.add_argument('--logo', help='the game\'s logo, which the launcher shows in place of its name: a PNG or WebP with transparency (Resources/dm/logo.png; the NSP script\'s <build folder>/art/logo.png)')
     ap.add_argument('--facts', help="About this game's facts (Resources/dm/facts.json; dm/tools/about_facts.py)")
     ap.add_argument('--about', help='the launcher\'s "About this game" text (Resources/dm/about.json; the NSP script\'s <build folder>/art/about.json)')

@@ -17,6 +17,8 @@ struct LibraryGame: Codable, Identifiable, Sendable, Equatable {
     var builtIcon: String?           // the icon and key art Beam's latest build of the game reported (its game and art events), for the library and Home
     var builtArt: String?
     var art: URL?                    // the player's picks (SteamGridDB, Art.swift): --art, --logo, --icon at the next build
+    var artFocus: ArtFocus?          // the player's framing of the key art (Adjust Framing, ArtFocus.swift): Beam Home and the game page now, --art-focus at the next build, the Mac app's preferences at once
+    var artFocusStale: Bool?         // a new key art was picked: the framing the Mac app keeps is for the old picture, forgotten after its next Mac build (unless framed again)
     var logo: URL?
     var icon: URL?
 
@@ -223,6 +225,10 @@ struct LibraryGame: Codable, Identifiable, Sendable, Equatable {
                 if case .failed(let why) = job.state { games[i].lastBuild = .init(target: target, date: .now, ok: false, message: why, package: package, nx18: stamp) }
                 else { games[i].lastBuild = .init(target: target, date: .now, ok: true, output: job.game?.out, icon: job.game?.icon, build: job.game?.build, package: package, nx18: stamp) }
                 save()
+                if target == .mac, job.state == .done, let app = macApp(id) {   // the player's framing over one the app's window kept before; after a new key art, none from the old one
+                    if let f = games[i].artFocus { MacArtFocus.write(f, app: app) } else if games[i].artFocusStale == true { MacArtFocus.forget(app: app) }
+                    if games[i].artFocusStale != nil { games[i].artFocusStale = nil; save() }
+                }
                 notify(games[i].title, ok: job.state == .done, target: target)
                 await checkRebuilds(force: true)
             }
@@ -232,6 +238,8 @@ struct LibraryGame: Codable, Identifiable, Sendable, Equatable {
     /// One run of the build script for a job: its events into the job, its end into the job's state (done, cancelled, or failed with the reason in a sentence)
     func runScript(_ job: BuildJob, _ req: BuildRequest, py: URL, checkout: NX18Checkout) async {
         job.state = .running
+        var req = req
+        if req.artFocus != nil && !checkout.knows("--art-focus") { req.artFocus = nil }   // an NX 18 from before the option stops at it: built with the middle of the art (a Mac app's framing is still written after its build)
         let stream = AsyncStream<BuildEvent>.makeStream()
         let pump = Task { @MainActor in for await e in stream.stream { job.apply(e); self.updateDock() } }
         let result: ScriptResult?

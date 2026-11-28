@@ -11,6 +11,7 @@ extension Library {
         if let m = g.manual, FileManager.default.fileExists(atPath: m.path) { req.manual = m }
         let have = { (u: URL?) in u.flatMap { FileManager.default.fileExists(atPath: $0.path) ? $0 : nil } }
         req.art = have(g.art); req.logo = have(g.logo); req.icon = have(g.icon)
+        req.artFocus = g.artFocus
         req.appName = g.customName
     }
 
@@ -171,7 +172,18 @@ extension Library {
     func setArt(_ url: URL?, _ kind: ArtKind, for id: UUID) {
         guard let i = games.firstIndex(where: { $0.id == id }) else { return }
         switch kind { case .keyArt: games[i].art = url; case .logo: games[i].logo = url; case .icon: games[i].icon = url }
+        if kind == .keyArt { games[i].artFocus = nil; games[i].artFocusStale = true }   // another picture: framed afresh (the art section offers Adjust Framing on it); the Mac app's old framing goes at its next build
         save()
+    }
+
+    /// The key art's framing (Adjust Framing): kept in the library for Beam Home, the game page and the next build, and written into the game's Mac app's preferences now, so
+    /// its window shows it at its next start (nil: back to the centre)
+    func setArtFocus(_ f: ArtFocus?, for id: UUID) {
+        guard let i = games.firstIndex(where: { $0.id == id }) else { return }
+        games[i].artFocus = f.flatMap { $0.isCentre ? nil : $0 }
+        save()
+        // a new key art not built yet (artFocusStale): the Mac app still shows the old one, so its framing waits for the next Mac build (Library.build writes it then)
+        if games[i].artFocusStale != true, let app = macApp(id) { MacArtFocus.write(games[i].artFocus ?? .centre, app: app) }
     }
 
     /// My files: the player's own guides and maps for a game (never packed into an IPA, which can be shared): Beam's folder, or the NX 18 folder's <TITLE ID>/Documents with
